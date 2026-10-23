@@ -203,6 +203,7 @@ def test_point_in_time_universe(cal):
     c = cl.set_index("symbol")
     assert c.loc["0050", "instrument_type"] == "etf"          # FinLab market == "etf"
     assert c.loc["0050", "market"] == "etf"
+    assert c.loc["00679B", "instrument_type"] == "etf"       # bond ETF outside market "etf"
     assert c.loc["9105", "instrument_type"] == "other"            # depositary receipt
     assert c.loc["1234", "classification_source"] == "code_rule_inferred"
     assert not c["classification_is_pit"].any()

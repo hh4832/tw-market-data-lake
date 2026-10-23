@@ -83,10 +83,10 @@ class FakeFinlab:
         if name.startswith("price:"):
             return self._frame(name)
         if name == "security_categories":
-            return GuardedFrame({"stock_id": ["2330", "0050", "9999", "5555", "9105"],
-                                 "symbol": ["2330", "0050", "9999", "5555", "9105"],
-                                 "category": ["半導體業", "domestic_etf", "電子零組件業", "鋼鐵工業", "存託憑證"],
-                                 "market": ["sii", "etf", "otc", "sii", "sii"]})   # real FinLab layout
+            return GuardedFrame({"stock_id": ["2330", "0050", "9999", "5555", "9105", "00679B"],
+                                 "symbol": ["2330", "0050", "9999", "5555", "9105", "00679B"],
+                                 "category": ["半導體業", "domestic_etf", "電子零組件業", "鋼鐵工業", "存託憑證", "其他證券"],
+                                 "market": ["sii", "etf", "otc", "sii", "sii", "other_securities"]})   # real FinLab layout
         if name == "disposal_information":
             # real FinLab: RangeIndex event table with UNORDERED categorical columns
             df = pd.DataFrame({"symbol": ["5555 測試", "5555 測試"], "date": pd.to_datetime(["2023-08-31", "2023-11-01"]),
