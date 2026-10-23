@@ -281,7 +281,8 @@ def test_full_requires_confirmation_and_update_requires_manifest(tmp_cfg, clock)
 def test_missing_disposal_dataset_fails_closed(tmp_cfg, clock):
     class NoDisposal(FakeFinlab):
         def get(self, name):
-            if name == "disposal_information":
+            if name in ("disposal_information", "etl:disposal_stock_filter", "etl:noticed_stock_filter",
+                        "notice_information"):
                 raise KeyError(name)
             return super().get(name)
     fin = NoDisposal()
@@ -327,3 +328,16 @@ def test_default_config_half_year_windows():
     assert [x[0] for x in b] == ["2023-01", "2023-07", "2024-01", "2024-07", "2025-01", "2025-07", "2026-01", "2026-07"]
     assert b[0][1] == date(2023, 5, 23)
     assert all((e - s).days < 366 and s.year == e.year for _, s, e in b)
+
+
+
+def test_categorical_event_table_is_stored(tmp_cfg, clock):
+    fin = FakeFinlab()
+    assert run(tmp_cfg, clock, fin, FakeFubon(fin)) == 0
+    ctx = StoreContext(Layout.from_config(tmp_cfg), "x", tmp_cfg.local_tmp, clock)
+    s = DatasetStore("disposal_attention", ctx, ["_dummy"], "1")
+    parts = set(s.partitions()["partition"])
+    assert parts == {"dataset=disposal_information", "dataset=etl_disposal_stock_filter"}
+    ev = s.read_partition("dataset=disposal_information")
+    assert list(ev["分時交易"]) == ["五分鐘", "二十分鐘"]
+    assert not isinstance(ev["stock_id"].dtype, pd.CategoricalDtype) and list(ev["stock_id"]) == ["5555", "5555"]

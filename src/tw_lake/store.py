@@ -200,7 +200,7 @@ class DatasetStore:
             return {
                 "partition": partition, "relpath": rel.as_posix(), "content_hash": ch,
                 "file_sha256": fsha, "n_rows": int(len(d)), "file_bytes": int(nbytes),
-                "min_key": str(d[k].min()) if len(d) else "", "max_key": str(d[k].max()) if len(d) else "",
+                "min_key": _safe_extreme(d[k], "min"), "max_key": _safe_extreme(d[k], "max"),
                 "created_run_id": ctx.run_id, "reused": reused,
             }
 
@@ -367,16 +367,36 @@ class DatasetStore:
         return report
 
 
+def _safe_extreme(s: pd.Series, how: str) -> str:
+    """min/max as text for the partitions table; never fails (categoricals, mixed types, NaN)."""
+    if len(s) == 0:
+        return ""
+    try:
+        return str(s.min() if how == "min" else s.max())
+    except Exception:  # noqa: BLE001
+        vals = sorted(s.dropna().astype(str))
+        return (vals[0] if how == "min" else vals[-1]) if vals else ""
+
+
 def _verify_same_values(expected: pd.DataFrame, back: pd.DataFrame, partition: str) -> None:
-    """Value-level read-back check (dtype representation may differ, values may not)."""
+    """Value-level read-back check (dtype representation may differ, values may not). Vectorized."""
     import numpy as np
-    if list(expected.columns) != list(back.columns):
-        raise IntegrityError(f"read-back columns differ for {partition}")
+    from .hashing import _datetime_ns, _kind
+    if list(expected.columns) != list(back.columns) or len(expected) != len(back):
+        raise IntegrityError(f"read-back shape/columns differ for {partition}")
     for c in expected.columns:
-        a = pd.Series(np.asarray(expected[c], dtype=object))
-        b = pd.Series(np.asarray(back[c], dtype=object))
-        ok = (a == b) | (a.isna() & b.isna())
-        if not bool(ok.all()):
+        a, b = expected[c], back[c]
+        ka, kb = _kind(a), _kind(b)
+        if ka in ("float", "int") and kb in ("float", "int"):
+            ok = np.array_equal(a.to_numpy(dtype="float64", na_value=np.nan),
+                                b.to_numpy(dtype="float64", na_value=np.nan), equal_nan=True)
+        elif ka.startswith("datetime") and kb.startswith("datetime"):
+            ok = np.array_equal(_datetime_ns(a), _datetime_ns(b))
+        else:
+            sa = pd.Series(np.asarray(a, dtype=object))
+            sb = pd.Series(np.asarray(b, dtype=object))
+            ok = bool(((sa == sb) | (sa.isna() & sb.isna())).all())
+        if not ok:
             raise IntegrityError(f"read-back values differ for {partition} column {c}")
 
 

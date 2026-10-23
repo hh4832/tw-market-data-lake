@@ -88,8 +88,16 @@ class FakeFinlab:
                                  "category": ["半導體業", "domestic_etf", "電子零組件業", "鋼鐵工業", "存託憑證"],
                                  "market": ["sii", "etf", "otc", "sii", "sii"]})   # real FinLab layout
         if name == "disposal_information":
-            return GuardedFrame({"stock_id": ["5555"], "處置起始時間": ["2023-09-01"], "處置結束時間": ["2023-09-14"],
-                                 "分時交易": ["五分鐘"]}, index=pd.to_datetime(["2023-08-31"]))
+            # real FinLab: RangeIndex event table with UNORDERED categorical columns
+            df = pd.DataFrame({"symbol": ["5555 測試", "5555 測試"], "date": pd.to_datetime(["2023-08-31", "2023-11-01"]),
+                               "處置開始時間": ["2023-09-01", "2023-11-02"], "處置結束時間": ["2023-09-14", "2023-11-15"],
+                               "分時交易": ["五分鐘", "二十分鐘"], "stock_id": ["5555", "5555"]})
+            for c in ("symbol", "分時交易", "stock_id"):
+                df[c] = df[c].astype("category")
+            return GuardedFrame(df)
+        if name == "etl:disposal_stock_filter":
+            close = self._frame("price:收盤價")
+            return GuardedFrame(pd.DataFrame(False, index=close.index, columns=close.columns))
         raise KeyError(f"unknown dataset {name}")
 
     def adjusted(self, price_name: str) -> pd.DataFrame:

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
 import pandas as pd
 
 _CHUNK = 1 << 20
@@ -49,39 +50,52 @@ def canonicalize(df: pd.DataFrame, key_cols: Sequence[str]) -> pd.DataFrame:
     return df.sort_values(list(key_cols), kind="mergesort").reset_index(drop=True)
 
 
+HASH_VERSION = "2"
+_SEP = b"\x1e"
+
+
+def _datetime_ns(s: pd.Series) -> np.ndarray:
+    if isinstance(s.dtype, pd.DatetimeTZDtype):
+        s = s.dt.tz_convert("UTC").dt.tz_localize(None)
+    return s.astype("datetime64[ns]").to_numpy().view("int64")
+
+
+def column_digest_bytes(s: pd.Series, kind: str) -> bytes:
+    """Version-independent byte rendering of one column (vectorized; no per-row formatting)."""
+    if kind == "float":
+        a = s.to_numpy(dtype="float64", na_value=np.nan) + 0.0       # -0.0 -> 0.0
+        a[np.isnan(a)] = np.nan                                         # canonical NaN payload
+        return np.ascontiguousarray(a).tobytes()
+    if kind == "int":
+        return np.ascontiguousarray(s.to_numpy(dtype="int64")).tobytes()
+    if kind in ("datetime", "datetime_tz"):
+        return np.ascontiguousarray(_datetime_ns(s)).tobytes()
+    vals = s.astype(object).tolist()
+    return "\x1f".join("\x00" if (v is None or (isinstance(v, float) and v != v)) else str(v) for v in vals).encode()
+
+
 def content_hash(df: pd.DataFrame, key_cols: Sequence[str]) -> str:
+    """SHA256 over canonical rows (sorted by key) and columns (sorted by name).
+    float/int/datetime columns are hashed from their binary values, everything else as text.
+    bool and nullable-int columns are rendered as text so object/bool or Int64/float differences
+    from parquet round trips cannot change the hash."""
     d = canonicalize(df, key_cols)
     cols = sorted(d.columns)
-    d = d[cols].copy()
     kinds = {}
+    h = hashlib.sha256()
     for c in cols:
-        k = _kind(d[c])
+        s = d[c]
+        k = _kind(s)
+        if k == "int" and s.isna().any():
+            k = "float"
+        if k == "bool":
+            k, s = "str", s.map(lambda v: None if pd.isna(v) else ("1" if bool(v) else "0"))
         kinds[c] = k
-        if k == "datetime_tz":
-            d[c] = d[c].dt.tz_convert("UTC").dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        elif k == "datetime":
-            d[c] = d[c].dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
-        elif k == "float":
-            d[c] = d[c].astype("float64")
-        elif k == "int":
-            if d[c].isna().any():
-                d[c] = d[c].astype("float64")
-                kinds[c] = "int_nullable"
-            else:
-                d[c] = d[c].astype("int64")
-        elif k == "bool":
-            d[c] = d[c].map(lambda v: "" if pd.isna(v) else ("1" if bool(v) else "0"))
-        else:
-            s_ = d[c].astype(object)
-            d[c] = s_.where(s_.notna(), "").astype(str)
-    header = json.dumps({"columns": cols, "kinds": kinds, "n": len(d)}, sort_keys=True).encode()
-    h = hashlib.sha256(header)
-    # chunked rendering keeps memory bounded on multi-million-row tables
-    step = 200_000
-    for i in range(0, len(d), step):
-        part = d.iloc[i : i + step]
-        h.update(part.to_csv(index=False, header=False, lineterminator="\n", float_format="%.17g", na_rep="").encode())
-    return h.hexdigest()
+        h.update(str(c).encode() + _SEP + k.encode() + _SEP)
+        h.update(column_digest_bytes(s, k))
+        h.update(_SEP)
+    header = json.dumps({"v": HASH_VERSION, "columns": cols, "kinds": kinds, "n": len(d)}, sort_keys=True).encode()
+    return hashlib.sha256(header + h.digest()).hexdigest()
 
 
 def roundtrip(df: pd.DataFrame) -> pd.DataFrame:

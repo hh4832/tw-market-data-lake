@@ -116,12 +116,16 @@ def discover_datasets(src: FinlabSource, candidates: list[str]) -> dict[str, dic
 
 
 def to_storable(df: pd.DataFrame) -> pd.DataFrame:
-    """Make an arbitrary FinLab frame parquet-safe and hashable: index -> columns, mixed objects -> str."""
+    """Make an arbitrary FinLab frame parquet-safe and hashable: index -> columns,
+    categorical / mixed objects -> str (FinLab returns unordered categoricals for event tables)."""
     d = plain(df)
     if not isinstance(d.index, pd.RangeIndex):
         d = d.reset_index()
     d.columns = [str(c) for c in d.columns]
     for c in d.columns:
-        if d[c].dtype == object:
-            d[c] = d[c].map(lambda v: None if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
+        col = d[c]
+        if isinstance(col.dtype, pd.CategoricalDtype):
+            col = col.astype(object)
+        if col.dtype == object or pd.api.types.is_string_dtype(col):
+            d[c] = col.map(lambda v: None if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)).astype(object)
     return d
