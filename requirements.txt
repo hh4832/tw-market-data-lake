@@ -1,0 +1,7 @@
+# Runtime (Colab / local). Fubon Neo SDK is NOT on PyPI: see scripts/install_colab_dependencies.py
+pandas>=2.2,<4
+numpy>=1.26
+pyarrow>=14
+pyyaml>=6
+tqdm>=4.66
+finlab==2.0.18

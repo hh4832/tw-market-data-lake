@@ -1,0 +1,34 @@
+# secrets / credentials
+.env
+*.pfx
+*.p12
+*.pem
+*.key
+service_account*.json
+*credentials*.json
+*secret*
+
+# environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# data / outputs (data lives on Google Drive, never in git)
+data/
+*.parquet
+*.csv
+logs/
+tmp/
+tmp_tw_lake/
+pipeline.log
+
+# vendor SDK binaries (installed from official download or Drive at runtime)
+lib/fubon_neo/*.zip
+lib/fubon_neo/*.whl
+lib/fubon_neo/**/*.whl
+
+.ipynb_checkpoints/
+.DS_Store

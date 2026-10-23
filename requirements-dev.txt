@@ -1,0 +1,7 @@
+# Offline tests only (no finlab / fubon_neo needed)
+pandas>=2.2,<4
+numpy>=1.26
+pyarrow>=14
+pyyaml>=6
+tqdm>=4.66
+pytest>=8

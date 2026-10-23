@@ -1,0 +1,80 @@
+# tw-market-data-lake default configuration.
+# Every value can be overridden by CLI flags; DATA_ROOT can also come from the environment.
+
+# Google Drive folder "00Quant_Research/data" (folder id 1jLOYnUhWx6coNV6eqYnjUAeeHZPP6aMh)
+data_root: /content/drive/MyDrive/00Quant_Research/data
+
+# Folders that already exist under data_root and must never be read, written, moved or deleted.
+protected_existing_folders:
+  - finlab_0050
+  - finlab_txf_calendar
+  - finlab_futures_afterhours
+  - fubon_txf
+  - IKBR
+
+# Folders owned by this repo (relative to data_root).
+system_dir: _tw-market-data-lake
+datasets:
+  finlab_daily_raw: finlab_stock_daily/raw
+  finlab_daily_adjusted: finlab_stock_daily/adjusted
+  security_categories: finlab_stock_reference/security_categories
+  disposal_attention: finlab_stock_reference/disposal_attention
+  universe_daily: finlab_stock_reference/universe_daily
+  fubon_symbol_master: fubon_stock_reference/symbol_master
+  fubon_5m: fubon_stock_5m
+
+# Local scratch space (fast local disk, NOT Drive). Files are verified here before staging to Drive.
+local_tmp: /content/tmp_tw_lake
+
+fubon:
+  minute_start: "2023-05-23"          # first date Fubon serves historical minute bars
+  timeframe: "5"
+  # turnover is requested explicitly. Fubon documents turnover for D/W/M only; if minute responses
+  # omit it the column is stored as null (never computed from price x volume). smoke reports presence.
+  fields: [open, high, low, close, volume, average, turnover]
+  window_months: 3                     # calendar-quarter windows; must stay < 12 (API limit < 1 year)
+  bar_label: start                     # "start" or "end"; confirm with smoke capability_report
+  historical_requests_per_min: 55      # official limit 60/min
+  intraday_requests_per_min: 280       # official limit 300/min (tickers / ticker)
+  max_attempts_per_request: 5
+  rate_limit_wait_sec: 61
+  backoff_base_sec: 2
+  backoff_max_sec: 60
+  max_window_attempts: 5               # unknown-404 windows beyond this are reported as exhausted
+  gap_retry_limit: 2                   # re-fetch attempts before accepting identical source gaps
+  data_ready_hhmm: "16:30"             # historical data for day D is complete after 16:30 Asia/Taipei
+  session_start: "09:00"
+  session_end: "13:30"
+  # minute volume unit per instrument type (Fubon: board-lot instruments report lots in minute bars)
+  volume_unit_by_type:
+    common_stock: lot
+    etf: lot
+
+finlab:
+  raw_fields:
+    open: "price:開盤價"
+    high: "price:最高價"
+    low: "price:最低價"
+    close: "price:收盤價"
+    volume_shares: "price:成交股數"
+    turnover: "price:成交金額"
+  # Candidate dataset names for disposal / attention history. smoke lists which ones load.
+  disposal_dataset_candidates:
+    - disposal_information
+    - etl:disposal_stock_filter
+    - etl:noticed_stock_filter
+    - notice_information
+  require_disposal_dataset: true
+  delist_gap_trading_days: 20          # last price older than this vs. market's latest date => delisted_inferred
+
+manifest:
+  commit_every_symbols: 50
+  lock_stale_minutes: 30
+
+qa:
+  volume_ratio_ok_low: 0.95            # 5m_shares / finlab_daily_shares
+  volume_ratio_ok_high: 1.02
+  price_tolerance: 0.0                 # absolute; 0 = exact tick match expected
+
+pilot_symbols: ["2330", "2317", "2454", "2603", "1101", "6488", "8299", "3105", "5347", "0050", "006208", "00878", "00631L", "00632R", "00679B"]
+smoke_symbols: ["2330", "6488", "0050"]
