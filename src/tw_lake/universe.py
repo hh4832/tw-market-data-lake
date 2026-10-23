@@ -31,7 +31,7 @@ def _code_rule(stock_id: str) -> str:
 
 def classify(security_categories: pd.DataFrame, symbols: list[str], asof: str) -> pd.DataFrame:
     """Return one row per symbol: instrument_type, market, category, classification_source, ..."""
-    cats = security_categories.copy()
+    cats = pd.DataFrame(security_categories).copy()   # plain pandas (FinlabDataFrame forbids index edits)
     for c in ("stock_id", "category", "market"):
         if c not in cats.columns:
             raise KeyError(f"security_categories missing column {c}")

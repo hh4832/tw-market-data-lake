@@ -84,6 +84,7 @@ class RunContext:
         lg.setLevel(logging.INFO)
         for h in list(lg.handlers):
             lg.removeHandler(h)
+            h.close()
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s")
         sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(fmt)

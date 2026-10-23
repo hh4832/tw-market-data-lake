@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from .errors import ApiError
-from .finlab_source import FinlabSource, discover_datasets
+from .finlab_source import FinlabSource, discover_datasets, plain
 from .fubon_source import FubonCaller, MarketClient, RateLimiter, RequestBudget, RetryPolicy, candle_params
 from .jobs_finlab import FinlabResult
 from .normalize import normalize_candles
@@ -71,12 +71,12 @@ def run_smoke(rc: RunContext, finlab_src: FinlabSource, fin: FinlabResult, clien
         rep["finlab"]["raw_daily"] = {"rows": int(len(r)), "symbols": int(r["symbol"].nunique()),
                                       "min_date": str(r["date"].min().date()), "max_date": str(r["date"].max().date())}
         try:
-            adj = finlab_src.adjusted("close")
+            adj = plain(finlab_src.adjusted("close"))
             rep["finlab"]["adjusted_close"] = {"ok": True, "shape": list(adj.shape),
                                                "max_date": str(pd.to_datetime(adj.index).max().date())}
         except Exception as e:  # noqa: BLE001
             rep["finlab"]["adjusted_close"] = {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
-        cats = finlab_src.get("security_categories")
+        cats = plain(finlab_src.get("security_categories"))
         rep["finlab"]["security_categories"] = {
             "shape": list(cats.shape), "columns": [str(c) for c in cats.columns],
             "market_counts": cats["market"].astype(str).value_counts().to_dict() if "market" in cats else None,

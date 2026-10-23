@@ -11,7 +11,7 @@ import pandas as pd
 from . import SCHEMA_VERSION
 from .calendar import TradingCalendar
 from .errors import RequiredDatasetMissing
-from .finlab_source import (FinlabSource, discover_datasets, load_adjusted_daily, load_raw_daily,
+from .finlab_source import (FinlabSource, discover_datasets, load_adjusted_daily, load_raw_daily, plain,
                             to_storable)
 from .normalize import merge_with_conflicts
 from .run_context import RunContext
@@ -104,7 +104,7 @@ def run_finlab_readonly(rc: RunContext, src: FinlabSource) -> FinlabResult:
         raw = load_raw_daily(src, cfg.finlab["raw_fields"])
         cal = TradingCalendar(raw)
     with rc.stage("finlab (read-only): classification + targets"):
-        cats = src.get("security_categories")
+        cats = plain(src.get("security_categories"))
         classification = classify(cats, sorted(raw["symbol"].unique()), asof)
         master = symbol_master_pit(raw, classification, cal.trading_days, int(cfg.finlab["delist_gap_trading_days"]))
         targets = minute_targets(master, cfg.minute_start)
@@ -137,7 +137,7 @@ def run_finlab(rc: RunContext, sctx: StoreContext, src: FinlabSource) -> FinlabR
             adj_store, _year_parts(adj), asof, {"data_max_date": str(adj["date"].max().date())})
 
     with rc.stage("finlab: security_categories snapshot"):
-        cats = src.get("security_categories")
+        cats = plain(src.get("security_categories"))
         cat_store = DatasetStore("security_categories", sctx, ["stock_id"], SCHEMA_VERSION,
                                  params={"source": "finlab", "dataset": "security_categories"})
         prepare_store(rc, cat_store)

@@ -17,6 +17,18 @@ class FinlabSource(Protocol):
     def adjusted(self, price_name: str) -> pd.DataFrame: ...
 
 
+def plain(df) -> pd.DataFrame | None:
+    """Convert FinlabDataFrame (which forbids index assignment) into a plain pandas DataFrame.
+    Safe here: we only store daily prices / reference tables and do our own date handling;
+    no quarterly/monthly report alignment happens in this repo."""
+    if df is None:
+        return None
+    out = pd.DataFrame(df).copy()
+    if type(out) is not pd.DataFrame:  # pragma: no cover - defensive
+        out = pd.DataFrame(out.to_dict("series"), index=out.index)
+    return out
+
+
 class RealFinlabSource:
     def __init__(self):
         try:
@@ -31,16 +43,16 @@ class RealFinlabSource:
         self._data = data
 
     def get(self, name: str) -> pd.DataFrame:
-        return self._data.get(name)
+        return plain(self._data.get(name))
 
     def adjusted(self, price_name: str) -> pd.DataFrame:
         """Same access path as complete-pullback-fubon-pipeline (TWMarket adj=True)."""
         from finlab.markets.tw import TWMarket  # type: ignore
         mkt = TWMarket()
         if hasattr(mkt, "get_trading_price"):
-            return mkt.get_trading_price(price_name, adj=True)
+            return plain(mkt.get_trading_price(price_name, adj=True))
         if hasattr(mkt, "get_price"):
-            return mkt.get_price(price_name, adj=True)
+            return plain(mkt.get_price(price_name, adj=True))
         raise ConfigError("TWMarket has neither get_trading_price nor get_price")
 
 
@@ -48,7 +60,7 @@ def wide_to_long(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """{field: wide(date x symbol)} -> long(date, symbol, field...). Rows with all-NaN values dropped."""
     parts = []
     for fld, w in frames.items():
-        w = w.copy()
+        w = plain(w)
         w.index = pd.to_datetime(w.index).normalize()
         w.index.name = "date"
         w.columns = w.columns.astype(str)
@@ -88,7 +100,7 @@ def discover_datasets(src: FinlabSource, candidates: list[str]) -> dict[str, dic
     out = {}
     for name in candidates:
         try:
-            df = src.get(name)
+            df = plain(src.get(name))
             info = {"ok": df is not None and len(df) > 0, "shape": list(df.shape) if df is not None else None,
                     "columns": [str(c) for c in list(df.columns)[:30]] if df is not None else None}
             if df is not None and len(df):
@@ -105,7 +117,7 @@ def discover_datasets(src: FinlabSource, candidates: list[str]) -> dict[str, dic
 
 def to_storable(df: pd.DataFrame) -> pd.DataFrame:
     """Make an arbitrary FinLab frame parquet-safe and hashable: index -> columns, mixed objects -> str."""
-    d = df.copy()
+    d = plain(df)
     if not isinstance(d.index, pd.RangeIndex):
         d = d.reset_index()
     d.columns = [str(c) for c in d.columns]

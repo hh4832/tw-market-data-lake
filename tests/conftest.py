@@ -28,6 +28,19 @@ def trading_days(start=date(2023, 4, 3), end=date(2024, 3, 29)) -> list[date]:
     return out
 
 
+class GuardedFrame(pd.DataFrame):
+    """Mimics FinlabDataFrame: assigning .index raises (finlab >= 2.0.18 behaviour)."""
+
+    @property
+    def _constructor(self):
+        return GuardedFrame
+
+    def __setattr__(self, name, value):
+        if name == "index":
+            raise AttributeError("不要直接覆寫 FinlabDataFrame 的 index！")
+        super().__setattr__(name, value)
+
+
 class FakeFinlab:
     """Wide frames like finlab.data.get(): index=date, columns=symbol."""
 
@@ -63,25 +76,25 @@ class FakeFinlab:
                     v = self.change_close[(k, d)]
                 vals.append(v)
             data[k] = vals
-        return pd.DataFrame(data, index=idx)
+        return GuardedFrame(data, index=idx)
 
     def get(self, name: str) -> pd.DataFrame:
         self.calls.append(name)
         if name.startswith("price:"):
             return self._frame(name)
         if name == "security_categories":
-            return pd.DataFrame({"stock_id": ["2330", "0050", "9999", "5555", "9105"],
+            return GuardedFrame({"stock_id": ["2330", "0050", "9999", "5555", "9105"],
                                  "symbol": ["2330", "0050", "9999", "5555", "9105"],
                                  "category": ["半導體業", "ETF", "電子零組件業", "鋼鐵工業", "存託憑證"],
                                  "market": ["sii", "sii", "otc", "sii", "sii"]})
         if name == "disposal_information":
-            return pd.DataFrame({"stock_id": ["5555"], "處置起始時間": ["2023-09-01"], "處置結束時間": ["2023-09-14"],
+            return GuardedFrame({"stock_id": ["5555"], "處置起始時間": ["2023-09-01"], "處置結束時間": ["2023-09-14"],
                                  "分時交易": ["五分鐘"]}, index=pd.to_datetime(["2023-08-31"]))
         raise KeyError(f"unknown dataset {name}")
 
     def adjusted(self, price_name: str) -> pd.DataFrame:
         m = {"open": "price:開盤價", "high": "price:最高價", "low": "price:最低價", "close": "price:收盤價"}
-        return self._frame(m[price_name]) * self.adj_factor
+        return GuardedFrame(pd.DataFrame(self._frame(m[price_name])) * self.adj_factor)
 
 
 class FakeAPIError(Exception):
