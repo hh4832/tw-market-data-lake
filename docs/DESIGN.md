@@ -40,7 +40,7 @@ Recovery scan（每個 dataset、每次 run 開始）：staging 殘留移至 qua
 
 ## 3. Coverage ①④
 
-`coverage_by_window`（真實來源）：`symbol × window`（日曆區塊，預設 3 個月、不跨年）。
+`coverage_by_window`（真實來源）：`symbol × window`（日曆區塊，預設 6 個月、不跨年；2026-10-23 smoke 顯示 360 天 5m 單次回傳未截斷）。
 欄位：`window_start/end, covered_to, status, error_class, error_msg, attempts, gap_days, gap_attempts, n_bars, ...`
 
 狀態：`pending / partial / failed / conflict / complete / complete_with_gaps /
@@ -111,7 +111,18 @@ published 檔案缺失觸發重建、manifest 表毀損 fail closed、兩個 wri
 dry-run 不寫入、full 需確認、處置資料集缺失 fail closed、smoke 只寫 smoke 資料夾。
 CI 在 pandas 2.2 與 3.x 兩種環境執行。
 
-## 9. 尚待真實資料確認
+## 9. Smoke 實測結果（2026-10-23，run 20261023_183553_fa5ecc1）
+
+- 360 天 5m（約 1.3 萬筆）單次回傳完整 → 無筆數上限疑慮，`window_months` 改為 6。
+- 時間戳為 bar 起點；每日 54 根：09:00–13:20 連續撮合 53 根 ＋ **13:30 一根＝收盤集合競價**（13:25 無 bar）。下游 30m 聚合須把 13:30 視為競價。
+- 分 K **沒有 turnover** → 欄位存 null、`turnover_present=False`。
+- 5m 量 ×1000 ÷ FinLab 成交股數：2330 中位數 0.87、0050 0.94、6488 0.96 → FinLab 日量含盤後定價／鉅額／零股等口徑，歸類為 `vendor_definition_diff`，非缺漏。
+- 6488 有 20 天每日僅 15 根 → 處置期間分盤撮合，資料照抓，下游以處置表判讀。
+- FinLab ETF 在 `security_categories` 的 market 為 `etf`（category `domestic_etf`／`foreign_etf`）；v1.1.1 修正分類，ETF 納入 5m 目標。
+- 處置／注意：`disposal_information`（事件表 8,125 列）、`etl:disposal_stock_filter`、`etl:noticed_stock_filter`（每日布林矩陣）可用；`notice_information` 不存在。
+- 已下市股（例 3202，最後價格 2025-04-02）富邦仍有分 K；休市區間回 404 → `no_data_market_closed`。
+
+## 10. 尚待真實資料確認
 
 1. 富邦單次回傳筆數上限（決定 `window_months`；改變需在首次 pilot 前）
 2. 分 K 時間戳是 bar 起點或終點；13:30 收盤競價呈現方式

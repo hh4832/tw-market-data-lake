@@ -85,8 +85,8 @@ class FakeFinlab:
         if name == "security_categories":
             return GuardedFrame({"stock_id": ["2330", "0050", "9999", "5555", "9105"],
                                  "symbol": ["2330", "0050", "9999", "5555", "9105"],
-                                 "category": ["半導體業", "ETF", "電子零組件業", "鋼鐵工業", "存託憑證"],
-                                 "market": ["sii", "sii", "otc", "sii", "sii"]})
+                                 "category": ["半導體業", "domestic_etf", "電子零組件業", "鋼鐵工業", "存託憑證"],
+                                 "market": ["sii", "etf", "otc", "sii", "sii"]})   # real FinLab layout
         if name == "disposal_information":
             return GuardedFrame({"stock_id": ["5555"], "處置起始時間": ["2023-09-01"], "處置結束時間": ["2023-09-14"],
                                  "分時交易": ["五分鐘"]}, index=pd.to_datetime(["2023-08-31"]))
@@ -177,7 +177,8 @@ def tmp_cfg(tmp_path):
         (root / p / "keep.txt").write_text("existing user data")
     cfg = load_config(overrides={"data_root": str(root), "local_tmp": str(tmp_path / "local_tmp"),
                                  "manifest": {"commit_every_symbols": 2, "lock_stale_minutes": 30},
-                                 "fubon": {"rate_limit_wait_sec": 0, "backoff_base_sec": 0, "backoff_max_sec": 0}})
+                                 "fubon": {"rate_limit_wait_sec": 0, "backoff_base_sec": 0, "backoff_max_sec": 0,
+                                           "window_months": 3}})   # tests pin quarter windows
     return cfg
 
 

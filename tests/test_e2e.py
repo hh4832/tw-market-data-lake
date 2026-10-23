@@ -16,8 +16,11 @@ SYMS = "2330,0050,1234,9999,5555"
 
 
 def run(cfg, clock, fin, fub, mode="pilot", extra=()):
-    argv = ["--mode", mode, "--data-root", str(cfg.data_root), "--symbols", SYMS, *extra]
     import os
+    import yaml
+    cfg_path = cfg.local_tmp.parent / "test_config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg.raw, allow_unicode=True), encoding="utf-8")
+    argv = ["--mode", mode, "--config", str(cfg_path), "--data-root", str(cfg.data_root), "--symbols", SYMS, *extra]
     os.environ["TW_LAKE_LOCAL_TMP"] = str(cfg.local_tmp)
     return cli.main(argv, finlab_factory=lambda: fin, fubon_factory=lambda: fub, clock=clock,
                     sleep=no_sleep, monotonic=lambda: 0.0)

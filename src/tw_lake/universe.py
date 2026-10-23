@@ -43,11 +43,14 @@ def classify(security_categories: pd.DataFrame, symbols: list[str], asof: str) -
         if sym in cats.index:
             r = cats.loc[sym]
             cat, mkt = r["category"], r["market"]
-            if mkt not in ("sii", "otc"):
-                itype = "other"
+            # FinLab puts ETFs in their own market "etf" (category domestic_etf / foreign_etf)
+            if mkt == "etf" or "ETF" in cat.upper():
+                itype = "etf"
+            elif mkt not in ("sii", "otc"):
+                itype = "other"                       # rotc / pub / other_securities ...
             elif "存託憑證" in cat:
                 itype = "other"
-            elif sym.startswith("00") or "ETF" in cat.upper():
+            elif sym.startswith("00"):
                 itype = "etf"
             elif len(sym) == 4 and sym.isdigit():
                 itype = "common_stock"

@@ -32,7 +32,7 @@ fubon:
   # turnover is requested explicitly. Fubon documents turnover for D/W/M only; if minute responses
   # omit it the column is stored as null (never computed from price x volume). smoke reports presence.
   fields: [open, high, low, close, volume, average, turnover]
-  window_months: 3                     # calendar-quarter windows; must stay < 12 (API limit < 1 year)
+  window_months: 6                     # half-year windows; smoke 2026-10-23: 360 days (13k rows) returned untruncated; must stay < 12
   bar_label: start                     # "start" or "end"; confirm with smoke capability_report
   historical_requests_per_min: 55      # official limit 60/min
   intraday_requests_per_min: 280       # official limit 300/min (tickers / ticker)

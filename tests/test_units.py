@@ -201,7 +201,8 @@ def test_point_in_time_universe(cal):
     raw = load_raw_daily(fin, RAW_FIELDS)
     cl = classify(fin.get("security_categories"), sorted(raw["symbol"].unique()), "2024-03-29")
     c = cl.set_index("symbol")
-    assert c.loc["0050", "instrument_type"] == "etf"
+    assert c.loc["0050", "instrument_type"] == "etf"          # FinLab market == "etf"
+    assert c.loc["0050", "market"] == "etf"
     assert c.loc["9105", "instrument_type"] == "other"            # depositary receipt
     assert c.loc["1234", "classification_source"] == "code_rule_inferred"
     assert not c["classification_is_pit"].any()
@@ -316,3 +317,13 @@ def test_smoke_writes_only_to_smoke_folder(tmp_cfg, clock):
     assert rep["recommendations"]["row_cap_suspected"] is False
     assert rep["fubon"]["holiday_window_2024-02-08_14"]["status_code"] == 404
     assert rep["finlab"]["disposal_attention_candidates"]["disposal_information"]["ok"] is True
+
+
+def test_default_config_half_year_windows():
+    from tw_lake.config import load_config
+    cfg = load_config()
+    assert cfg.fubon["window_months"] == 6
+    b = window_blocks(date(2023, 5, 23), date(2026, 10, 22), 6)
+    assert [x[0] for x in b] == ["2023-01", "2023-07", "2024-01", "2024-07", "2025-01", "2025-07", "2026-01", "2026-07"]
+    assert b[0][1] == date(2023, 5, 23)
+    assert all((e - s).days < 366 and s.year == e.year for _, s, e in b)
