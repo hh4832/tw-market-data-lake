@@ -53,8 +53,10 @@ def window_qa(df: pd.DataFrame, cal: TradingCalendar, symbol: str, start: date, 
             q.hard_failures.append("bar_outside_requested_range")
         t = df["bar_start"].dt.time
         ss, se = parse_hhmm(session_start), parse_hhmm(session_end)
-        if ((t < ss) | (t > se)).any():
-            q.hard_failures.append("bar_outside_session")
+        out = (t < ss) | (t > se)
+        if out.any():
+            sample = df.loc[out, "bar_start"].dt.strftime("%Y-%m-%d %H:%M").head(5).tolist()
+            q.hard_failures.append(f"bar_outside_session(n={int(out.sum())};e.g.={'|'.join(sample)})")
         market_days = set(cal.trading_days_between(start, end))
         if not set(d.unique()).issubset(market_days):
             q.hard_failures.append("bar_on_non_trading_day")

@@ -125,6 +125,7 @@ class FakeFubon:
         self.transient_failures: dict[tuple, int] = {}
         self.rate_limit_once: set[tuple] = set()
         self.price_shift: dict[tuple, float] = {}     # (symbol, date) -> added to all prices (conflicts)
+        self.extra_bars: dict[str, list[dict]] = {}   # symbol -> raw rows appended (e.g. off-session)
         self.calls: list[dict] = []
 
     def historical_candles(self, params: dict) -> dict:
@@ -160,6 +161,9 @@ class FakeFubon:
                     rows.append({"date": t.strftime("%Y-%m-%dT%H:%M:%S.000+08:00"), "open": c + sh,
                                  "high": max(bh, c) + sh, "low": min(bl, c) + sh, "close": c + sh,
                                  "volume": per, "average": c})
+        for r in self.extra_bars.get(sym, []):
+            if a <= date.fromisoformat(r["date"][:10]) <= b:
+                rows.append(r)
         if not rows:
             raise FakeAPIError(404, "Resource Not Found")
         return {"symbol": sym, "timeframe": params["timeframe"], "data": rows}

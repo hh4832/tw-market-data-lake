@@ -342,3 +342,18 @@ def test_categorical_event_table_is_stored(tmp_cfg, clock):
     ev = s.read_partition("dataset=disposal_information")
     assert list(ev["分時交易"]) == ["五分鐘", "二十分鐘"]
     assert not isinstance(ev["stock_id"].dtype, pd.CategoricalDtype) and list(ev["stock_id"]) == ["5555", "5555"]
+
+
+
+def test_off_session_bar_rejected_with_details_and_quarantined(tmp_cfg, clock):
+    fin = FakeFinlab()
+    fub = FakeFubon(fin)
+    fub.extra_bars = {"2330": [{"date": "2023-08-15T14:00:00.000+08:00", "open": 1, "high": 1, "low": 1,
+                                "close": 1, "volume": 1, "average": 1}]}
+    assert run(tmp_cfg, clock, fin, fub) == 2
+    from test_e2e import windows
+    w = windows(tmp_cfg, clock).set_index(["symbol", "window_id"])
+    r = w.loc[("2330", "2023-07")]
+    assert r["status"] == "partial" and "2023-08-15 14:00" in r["error_msg"]
+    q = list((tmp_cfg.data_root / "_tw-market-data-lake" / "quarantine").rglob("2330_2023-07_*.parquet"))
+    assert len(q) == 1 and len(pd.read_parquet(q[0])) > 0

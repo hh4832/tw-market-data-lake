@@ -122,6 +122,16 @@ CI 在 pandas 2.2 與 3.x 兩種環境執行。
 - 處置／注意：`disposal_information`（事件表 8,125 列）、`etl:disposal_stock_filter`、`etl:noticed_stock_filter`（每日布林矩陣）可用；`notice_information` 不存在。
 - 已下市股（例 3202，最後價格 2025-04-02）富邦仍有分 K；休市區間回 404 → `no_data_market_closed`。
 
+### Full 第 1 段（2026-10-24，run 20261024_102239_d16da15）
+
+- 9,000 次請求、約 53 次／分；3,326 萬根 bar；無 conflict、無 data_error。
+- Recovery 偵測到 pilot 時寫入的 3 個檔案在 Drive 上變成 0 byte（size 檢查），已自動隔離並重寫。
+  推測為 Colab Drive FUSE 非同步上傳未完成；notebook 執行後改為 `drive.flush_and_unmount()`。
+- 551 個 window 有 source gap（179 檔、3,089 個交易日），集中在低流動性股票：FinLab 有成交量但盤中無成交，
+  很可能僅有盤後定價／鉅額成交。依規則重抓 2 次相同後轉 `complete_with_gaps`。
+- 23 個 window `bar_outside_session`（皆為非電子類小型股）；v1.1.2 起錯誤訊息記錄違規 bar 時間，
+  並把被拒資料存到 quarantine 供判讀，再決定是否放寬時段規則。
+
 ## 10. 尚待真實資料確認
 
 1. 富邦單次回傳筆數上限（決定 `window_months`；改變需在首次 pilot 前）

@@ -220,6 +220,7 @@ class FubonJob:
                                  f["session_start"], f["session_end"])
                 if not o.qa.ok:
                     o.kind, o.error_class, o.error_msg = "qa_fail", "qa_hard_fail", ",".join(o.qa.hard_failures)
+                    self._quarantine_rejected(o)
         data = [o for o in outcomes if o.kind == "data"]
         for year, grp in itertools.groupby(sorted(data, key=lambda o: o.task.year), key=lambda o: o.task.year):
             grp = list(grp)
@@ -259,6 +260,18 @@ class FubonJob:
             self.recon_ranges[sym] = (a if lo is None else min(lo, a), b if hi is None else max(hi, b))
         for o in outcomes:
             self._apply(o)
+
+    def _quarantine_rejected(self, o: TaskOutcome) -> None:
+        """Keep QA-rejected source data for inspection (never published, never deleted)."""
+        try:
+            lay = self.rc.layout
+            dest = lay.quarantine / self.rc.run_id / "fubon_5m_qa_rejected" / \
+                f"{o.task.symbol}_{o.task.window_id}_{o.task.fetch_from}_{o.task.fetch_to}.parquet"
+            lay.assert_writable(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            o.df.to_parquet(dest, index=False)
+        except Exception as e:  # noqa: BLE001 - diagnostics only
+            self.rc.log.warning("could not quarantine rejected window %s %s: %r", o.task.symbol, o.task.window_id, e)
 
     def _apply(self, o: TaskOutcome) -> None:
         t, w, i = o.task, self.windows, self.widx[(o.task.symbol, o.task.window_id)]
