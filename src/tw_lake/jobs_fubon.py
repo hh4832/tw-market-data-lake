@@ -57,6 +57,7 @@ class FubonJob:
     request_log: list[dict] = field(default_factory=list)
     conflict_rows: list[dict] = field(default_factory=list)
     delta_rows: list[dict] = field(default_factory=list)
+    excluded_rows: list[dict] = field(default_factory=list)
     minute_daily: list[pd.DataFrame] = field(default_factory=list)
     recon_ranges: dict = field(default_factory=dict)
     outcome_counts: dict = field(default_factory=dict)
@@ -156,6 +157,7 @@ class FubonJob:
             "stop_reason": stop_reason, "requests_used": self.caller.budget.used,
             "outcomes": self.outcome_counts, "conflicts": len(self.conflict_rows),
             "new_bars": int(sum(d["bars_added"] for d in self.delta_rows)),
+            "bars_excluded_outside_listing": int(sum(r["bars_excluded"] for r in self.excluded_rows)),
             "seq": (store.pointer() or {}).get("seq"),
         })
         self._artifacts()
@@ -214,8 +216,10 @@ class FubonJob:
 
     def _write_symbol(self, sym: str, outcomes: list[TaskOutcome]) -> None:
         f, cal = self.rc.cfg.fubon, self.fin.calendar
+        facts = cal.facts(sym)
         for o in outcomes:
             if o.kind == "data":
+                o.df = self._keep_listed_days(o, facts)
                 o.qa = window_qa(o.df, cal, sym, o.task.fetch_from, o.task.fetch_to,
                                  f["session_start"], f["session_end"])
                 if not o.qa.ok:
@@ -260,6 +264,28 @@ class FubonJob:
             self.recon_ranges[sym] = (a if lo is None else min(lo, a), b if hi is None else max(hi, b))
         for o in outcomes:
             self._apply(o)
+
+    def _keep_listed_days(self, o: TaskOutcome, facts) -> pd.DataFrame:
+        """Drop bars outside the symbol's TWSE/TPEx listing span (FinLab first..last price date).
+        Fubon also serves emerging-board (興櫃) bars, e.g. before an IPO: 09:00-15:00 session and
+        volume in shares, i.e. a different instrument regime that does not belong in this dataset."""
+        df = o.df
+        if len(df) == 0 or facts.first_price_date is None:
+            return df
+        d = df["bar_start"].dt.date
+        keep = d >= facts.first_price_date
+        if facts.last_price_date is not None:
+            keep &= d <= facts.last_price_date
+        n_out = int((~keep).sum())
+        if n_out:
+            dropped = df.loc[~keep, "bar_start"]
+            self.excluded_rows.append({
+                "symbol": o.task.symbol, "window_id": o.task.window_id, "bars_excluded": n_out,
+                "first_excluded": str(dropped.min()), "last_excluded": str(dropped.max()),
+                "first_price_date": str(facts.first_price_date), "last_price_date": str(facts.last_price_date),
+                "reason": "outside_listing_span (e.g. emerging board before IPO)",
+            })
+        return df.loc[keep].reset_index(drop=True)
 
     def _quarantine_rejected(self, o: TaskOutcome) -> None:
         """Keep QA-rejected source data for inspection (never published, never deleted)."""
@@ -345,6 +371,8 @@ class FubonJob:
         rc = self.rc
         rc.add_table("request_log", pd.DataFrame(self.request_log))
         rc.add_table("delta_report_5m", pd.DataFrame(self.delta_rows))
+        if self.excluded_rows:
+            rc.add_table("excluded_outside_listing_5m", pd.DataFrame(self.excluded_rows))
         if self.conflict_rows:
             rc.add_table("conflicts_5m", pd.DataFrame(self.conflict_rows))
         md = pd.concat(self.minute_daily, ignore_index=True) if self.minute_daily else pd.DataFrame()

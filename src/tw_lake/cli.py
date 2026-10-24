@@ -76,7 +76,8 @@ def qa_summary_md(rc: RunContext, status: str) -> str:
         recon = m.get("reconciliation", {})
         lines += ["## Fubon 5m", f"- latest available date: {m.get('latest_available_date')}",
                   f"- plan: {m.get('plan')}", f"- requests used: {m.get('requests_used')}  stop: {m.get('stop_reason')}",
-                  f"- outcomes: {m.get('outcomes')}", f"- conflicts: {m.get('conflicts')}  new bars: {m.get('new_bars')}",
+                  f"- outcomes: {m.get('outcomes')}", f"- conflicts: {m.get('conflicts')}  new bars: {m.get('new_bars')}  "
+                  f"bars excluded outside listing span: {m.get('bars_excluded_outside_listing', 0)}",
                   f"- reconciliation status: **{recon.get('status', 'n/a')}**  {recon.get('by_classification', {})}",
                   "  (vendor_definition_diff is informational; only data_error is a data failure)", ""]
     rec = [r for r in i.get("recovery", []) if r.get("missing_files") or r.get("corrupt_files")

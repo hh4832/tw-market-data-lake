@@ -357,3 +357,22 @@ def test_off_session_bar_rejected_with_details_and_quarantined(tmp_cfg, clock):
     assert r["status"] == "partial" and "2023-08-15 14:00" in r["error_msg"]
     q = list((tmp_cfg.data_root / "_tw-market-data-lake" / "quarantine").rglob("2330_2023-07_*.parquet"))
     assert len(q) == 1 and len(pd.read_parquet(q[0])) > 0
+
+
+
+def test_emerging_board_bars_before_listing_are_excluded(tmp_cfg, clock):
+    """9999 lists 2023-11-01; Fubon also returns pre-IPO emerging-board bars incl. 14:00."""
+    fin = FakeFinlab()
+    fub = FakeFubon(fin)
+    fub.extra_bars = {"9999": [{"date": f"2023-10-{d:02d}T{h}:00.000+08:00", "open": 5, "high": 5, "low": 5,
+                                "close": 5, "volume": 1000, "average": 5}
+                               for d in (16, 17, 18) for h in ("10:00", "14:00", "14:55")]}
+    assert run(tmp_cfg, clock, fin, fub) == 0
+    from test_e2e import store, windows
+    w = windows(tmp_cfg, clock).set_index(["symbol", "window_id"])
+    assert w.loc[("9999", "2023-10"), "status"] == "complete"
+    p = store(tmp_cfg, clock).read_partition("symbol=9999/year=2023")
+    assert p["bar_start"].min().date() == date(2023, 11, 1)
+    runs = sorted((tmp_cfg.data_root / "_tw-market-data-lake" / "runs").iterdir())
+    ex = pd.read_parquet(runs[-1] / "excluded_outside_listing_5m.parquet")
+    assert ex.set_index("symbol").loc["9999", "bars_excluded"] == 9

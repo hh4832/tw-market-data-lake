@@ -132,6 +132,15 @@ CI 在 pandas 2.2 與 3.x 兩種環境執行。
 - 23 個 window `bar_outside_session`（皆為非電子類小型股）；v1.1.2 起錯誤訊息記錄違規 bar 時間，
   並把被拒資料存到 quarantine 供判讀，再決定是否放寬時段規則。
 
+### Full 第 2 段（2026-10-24，run 20261024_144318_a9e54e9）
+
+- 8,929 次請求，所有 window 都處理過（pending 0）；無 conflict、無 data_error；recovery 乾淨。
+- 第 1 段的 551 個缺日 window 重抓結果相同 → `complete_with_gaps`（規則如預期收斂）。
+- 197 個 `bar_outside_session`：違規 bar 落在 13:35–14:55，且集中在各股上市當期的 window →
+  富邦也回傳**興櫃時期**（上市前）的分 K（興櫃交易至 15:00、量單位為股）。
+  v1.1.3 起只保留 FinLab 首／末價格日之間（上市櫃期間）的 bar，其餘排除並記錄於
+  `excluded_outside_listing_5m`；被擋的 window 下一次 update 會重抓修復。
+
 ## 10. 尚待真實資料確認
 
 1. 富邦單次回傳筆數上限（決定 `window_months`；改變需在首次 pilot 前）
