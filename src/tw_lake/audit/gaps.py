@@ -47,11 +47,15 @@ def classify_gaps(gaps: pd.DataFrame, finlab: pd.DataFrame, regime: pd.DataFrame
     x = x.merge(rg, on=["symbol", "date"], how="left")
     x["regime"] = x["regime"].fillna("normal")
     lots = x["finlab_volume_shares"] / 1000.0
-    conds = [x["regime"] != "normal", lots.isna(), lots < 1, lots >= source_missing_min_lots]
+    # FinLab volume > 0 with no close price: the shares came only from block / after-hours fixed-price
+    # trades (round lot sizes such as 500,000 or 6,000,002 shares); there was no regular-session trade.
+    close_missing = x["finlab_close"].isna()
+    conds = [x["regime"] != "normal", lots.isna(), lots < 1, close_missing, lots >= source_missing_min_lots]
     x["classification"] = np.select(conds, ["trading_regime_disposal", "unresolved", "no_regular_session_trade_probable",
-                                            "source_missing_suspected"], default="unresolved")
-    x["evidence"] = ("finlab_lots=" + lots.round(3).astype(str) + ";api_repeat_identical="
-                     + (x["gap_attempts"] >= 2).astype(str) + ";regime=" + x["regime"])
+                                            "no_regular_session_trade_probable", "source_missing_suspected"],
+                                    default="unresolved")
+    x["evidence"] = ("finlab_lots=" + lots.round(3).astype(str) + ";finlab_close_missing=" + close_missing.astype(str)
+                     + ";api_repeat_identical=" + (x["gap_attempts"] >= 2).astype(str) + ";regime=" + x["regime"])
     x["manifest_seq"] = seq
     return x[GAP_COLUMNS].sort_values(["symbol", "date"]).reset_index(drop=True)
 

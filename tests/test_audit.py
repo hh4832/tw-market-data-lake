@@ -380,3 +380,17 @@ def test_v021_defaults():
     rec = pd.DataFrame({"symbol": list("ABCD"), "date": pd.Timestamp("2024-02-20"), "classification": "ok"})
     tol = research_ready(days, rec, set()).set_index("symbol")["ready_5m_no_trade_tolerant"]
     assert tol.to_dict() == {"A": False, "B": True, "C": False, "D": True}
+
+
+def test_gap_with_finlab_volume_but_no_close_is_no_regular_trade():
+    from tw_lake.audit.gaps import classify_gaps
+    gaps = pd.DataFrame({"symbol": ["A", "B", "C"], "date": pd.to_datetime(["2024-12-16"] * 3), "window_id": "2024-07",
+                         "window_status": "complete_with_gaps", "gap_attempts": 2})
+    fin = pd.DataFrame({"symbol": ["A", "B", "C"], "date": pd.to_datetime(["2024-12-16"] * 3),
+                        "volume_shares": [500000.0, 3617707.0, 300.0], "turnover": [1.3e7, 1.1e8, 1e4],
+                        "close": [np.nan, 31.23, np.nan]})
+    g = classify_gaps(gaps, fin, pd.DataFrame(), 1).set_index("symbol")
+    assert g.loc["A", "classification"] == "no_regular_session_trade_probable"     # block trade only
+    assert "finlab_close_missing=True" in g.loc["A", "evidence"]
+    assert g.loc["B", "classification"] == "source_missing_suspected"
+    assert g.loc["C", "classification"] == "no_regular_session_trade_probable"

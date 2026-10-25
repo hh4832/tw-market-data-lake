@@ -97,7 +97,8 @@ def test_plan_repair_before_extend_and_new():
     assert order[:2] == [("repair", "A", "2023-07"), ("repair", "B", "2023-04")]
     ext = [t for t in tasks if t.reason == "extend"][0]
     assert (ext.fetch_from, ext.fetch_to) == (date(2023, 11, 30), date(2023, 12, 15))   # inclusive overlap
-    assert stats == {"repair": 2, "extend": 1, "new": 2, "skipped_exhausted": 0, "held_conflict": 0, "up_to_date": 1}
+    assert stats == {"repair": 2, "extend": 1, "new": 2, "skipped_exhausted": 0, "held_conflict": 0, "up_to_date": 1,
+                     "refetch_gaps": 0}
 
 
 def test_pre_existing_pending_is_repaired_first():
