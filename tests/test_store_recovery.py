@@ -59,18 +59,40 @@ def test_never_overwrites_different_content(tmp_cfg, clock):
 
 
 @pytest.mark.parametrize("damage", [b"", b"PAR1 truncated"])
-def test_unreferenced_partial_file_is_quarantined_and_rewritten(tmp_cfg, clock, damage):
-    """A crashed (or Drive-lost, 0-byte) write that no manifest references is replaced, never trusted."""
+def test_unreferenced_partial_file_is_left_alone_and_data_goes_to_fresh_path(tmp_cfg, clock, damage):
+    """A crashed (or Drive-lost, 0-byte) write is never trusted, never moved and its path never reused."""
     s = mkstore(tmp_cfg, clock)
     r = s.publish_partition(frame(), "snapshot")     # not committed
     fp = s.root / r["relpath"]
     fp.write_bytes(damage)
     s2 = mkstore(tmp_cfg, clock, run_id="r2")
     r2 = s2.publish_partition(frame(), "snapshot")
-    assert not r2["reused"] and r2["relpath"] == r["relpath"]
-    assert fp.stat().st_size == r["file_bytes"]
-    q = list((s.ctx.layout.quarantine / "r2").rglob("*.parquet"))
-    assert len(q) == 1 and q[0].read_bytes() == damage and "orphan_partial" in str(q[0])
+    assert not r2["reused"] and r2["relpath"] != r["relpath"]
+    assert r2["relpath"].endswith(f"{r['content_hash'][:32]}-r2.parquet")
+    assert fp.read_bytes() == damage                  # bad file untouched (reported as orphan later)
+    assert (s.root / r2["relpath"]).stat().st_size == r2["file_bytes"]
+    s2.commit({"partitions": pd.DataFrame([r2])})
+    rep = mkstore(tmp_cfg, clock, run_id="r3").recovery_scan()
+    assert r["relpath"] in rep["orphan_files"] and not rep["corrupt_files"]
+    r3 = mkstore(tmp_cfg, clock, run_id="r4").publish_partition(frame(), "snapshot")
+    assert r3["reused"] is False or r3["relpath"] in (r["relpath"], r2["relpath"])
+
+
+def test_bad_published_file_is_repaired_to_fresh_path(tmp_cfg, clock):
+    s = mkstore(tmp_cfg, clock)
+    r = s.publish_partition(frame(), "snapshot")
+    s.commit({"partitions": pd.DataFrame([r])})
+    (s.root / r["relpath"]).write_bytes(b"")         # 0-byte on Drive
+    s2 = mkstore(tmp_cfg, clock, run_id="r2")
+    rep = s2.recovery_scan()
+    assert rep["corrupt_files"] == ["snapshot"] and "snapshot" in s2.bad_partitions
+    r2 = s2.publish_partition(frame(), "snapshot")
+    assert r2["relpath"] != r["relpath"] and (s2.root / r["relpath"]).read_bytes() == b""
+    s2.commit({"partitions": pd.DataFrame([r2])})
+    s3 = mkstore(tmp_cfg, clock, run_id="r3")
+    rep3 = s3.recovery_scan()
+    assert rep3["corrupt_files"] == []                # still referenced by the old manifest version only
+    assert len(s3.read_partition("snapshot", verify=True)) == 5
 
 
 def test_data_files_are_written_without_rename(tmp_cfg, clock, monkeypatch):
@@ -105,9 +127,10 @@ def test_interrupted_data_write_leaves_manifest_untouched(tmp_cfg, clock, stage)
     assert moved == []                                # data files no longer pass through staging
     if stage in ("mid_publish", "after_publish"):
         assert len(rep["orphan_files"]) == 1          # partial/complete but never committed: reported, kept
-    if stage == "mid_publish":                        # next write of the same content replaces the partial file
+    if stage == "mid_publish":                        # next write goes to a fresh path; partial file untouched
         r = s3.publish_partition(frame(shift=3), "snapshot")
-        assert not r["reused"] and (s3.root / r["relpath"]).stat().st_size == r["file_bytes"]
+        assert not r["reused"] and r["relpath"].endswith("-r3.parquet")
+        assert (s3.root / r["relpath"]).stat().st_size == r["file_bytes"]
 
 
 def test_interrupted_manifest_commit(tmp_cfg, clock):

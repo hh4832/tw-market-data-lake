@@ -34,7 +34,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "tests"))
 MARKER = ".fault_injection_root"
-PROTOCOLS = ("rename_copy2", "direct_fsync")
+PROTOCOLS = ("rename_copy2", "direct_fsync", "move_then_same_path", "keep_bad_fresh_path")
+NEW_PROTOCOLS = ("direct_fsync", "keep_bad_fresh_path")     # what the store uses now
 
 
 def sha(p: Path) -> str:
@@ -77,7 +78,17 @@ def write_protocols(root: Path, n: int, label: str, expected: Path, tmp: Path) -
                 stg.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(local, stg)
                 os.replace(stg, final)
-            else:                                             # new protocol: exclusive write + fsync, no rename
+            elif proto == "direct_fsync":                     # fresh path: exclusive write + fsync, no rename
+                _durable_write(local, final)
+            elif proto == "move_then_same_path":              # repair as done by commit c169ddf (failed on Drive)
+                _durable_write(local, final)
+                q = root / label / proto / "quarantine" / final.name
+                q.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(final), str(q))
+                _durable_write(local, final)
+            else:                                             # repair now: leave bad file, write fresh path
+                final.write_bytes(b"")                        # simulate a 0-byte bad file at the old path
+                final = final.with_name(final.stem + "-repair.parquet")
                 _durable_write(local, final)
             assert sha(final) == h                            # what the writer sees (local FUSE cache)
             exp[str(final)] = {"size": size, "sha256": h, "protocol": proto}
@@ -105,8 +116,11 @@ def check_protocols(expected: Path) -> int:
         rows.append({"protocol": e["protocol"], "status": st})
     t = pd.DataFrame(rows).value_counts().unstack(fill_value=0)
     print(t.to_string())
-    bad_new = int(t.drop(columns=["ok"], errors="ignore").loc["direct_fsync"].sum()) if "direct_fsync" in t.index else -1
-    print("RESULT new protocol:", "PASS" if bad_new == 0 else f"FAIL ({bad_new} bad files)")
+    bad = t.drop(columns=["ok"], errors="ignore")
+    bad_new = int(sum(bad.loc[p].sum() for p in NEW_PROTOCOLS if p in bad.index)) if len(bad.columns) else 0
+    print("RESULT protocols used by the store now", NEW_PROTOCOLS, ":",
+          "PASS" if bad_new == 0 else f"FAIL ({bad_new} bad files)")
+    print("(rename_copy2 / move_then_same_path are the old protocols, shown for evidence only)")
     return 0 if bad_new == 0 else 1
 
 

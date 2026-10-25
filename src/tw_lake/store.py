@@ -10,8 +10,10 @@ Layout of one dataset root:
 
 Write protocol for a data file (never overwrites, no rename on Drive):
     1. canonicalize + content hash
-    2. if <hash>.parquet already exists -> read back, verify content hash, reuse
-       (an existing *unreferenced* file with wrong content/size is a crashed write: quarantined, rewritten)
+    2. if <hash>.parquet already exists -> read back, verify content hash, reuse.
+       If it exists but is corrupt/partial (and is unreferenced, or recovery marked it bad), it is left
+       untouched and the data is written to a fresh path <hash32>-<run_id>.parquet: a path that was
+       renamed/moved on Drive FUSE is never written again (2026-10-25: rewrites after a move stayed 0-byte)
     3. write to local tmp, read back, verify rows + content hash, compute SHA256
     4. write directly to the final content-addressed path with exclusive create ('xb') + fsync,
        verify SHA256. No staging->final rename: on Colab's Drive FUSE a rename right after a write
@@ -234,10 +236,15 @@ class DatasetStore:
             referenced = rel.as_posix() in self._published_relpaths()
             if referenced and partition not in self.bad_partitions:
                 raise ImmutableViolation(f"{final} exists with different content; refusing to overwrite")
-            sub = "corrupt" if referenced else "orphan_partial"
-            q = layout.quarantine / ctx.run_id / self.name / sub / rel
-            layout.assert_writable(q)
-            _move(final, q)  # preserved for inspection, never deleted
+            # Never move/rename the bad file and never write at its path again: on Colab's Drive FUSE,
+            # "move away + create the same path" left the new file 0-byte on Drive (run
+            # 20261025_140026_c169ddf, 82/82 repaired partitions). The bad file stays in place (it is
+            # unreferenced after the commit and reported as an orphan); the repaired copy gets a fresh
+            # path: <hash32>-<run_id>[-n].parquet
+            rel, final = self._fresh_relpath(partition, ch)
+            layout.assert_writable(final)
+            log.warning("%s %s: existing %s file is %s; writing repaired copy to fresh path %s", self.name,
+                        partition, "referenced" if referenced else "unreferenced", "corrupt/partial", rel)
 
         fsha = file_sha256(local)
         ctx.fault("after_local_verify")
@@ -248,6 +255,15 @@ class DatasetStore:
         local.unlink(missing_ok=True)
         ctx.fault("after_publish")
         return record(fsha, nbytes, reused=False)
+
+    def _fresh_relpath(self, partition: str, ch: str) -> tuple[Path, Path]:
+        base = f"{ch[:32]}-{self.ctx.run_id}"
+        for i in range(1000):
+            name = f"{base}.parquet" if i == 0 else f"{base}-{i}.parquet"
+            rel = Path("data") / partition / name
+            if not (self.root / rel).exists():
+                return rel, self.root / rel
+        raise ImmutableViolation(f"no fresh path available for {partition}")
 
     def _published_relpaths(self) -> set[str]:
         parts = self.partitions()          # raises IntegrityError on a corrupt manifest (fail closed)

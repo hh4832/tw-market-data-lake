@@ -33,8 +33,10 @@ v1 任務範圍與授權邊界不變：**只抓資料**，不做 30m 聚合、�
 
 > v1.2（2026-10-25，B1）：稽核發現 copy2→staging→rename 的資料檔在 Drive 上有 83 個成為 0-byte（寫入端讀回時命中
 > FUSE 本機快取所以驗證通過；run 結束時的 flush/remount 也沒有救回）。新協定不在 Drive 上 rename 資料檔；
-> 未被任何 manifest 引用、內容或大小不對的同名檔（中斷或遺失的寫入）會移到 `quarantine/<run>/<dataset>/orphan_partial/`
-> 後重寫；已被引用者照舊拒絕覆蓋（除非 recovery 判定為毀損）。持久性只能在**重新掛載後**驗證：
+> 同名檔若內容或大小不對（中斷、遺失的寫入，或 recovery 判定毀損的已發布檔），**不移動、不重用該路徑**，
+> 修復資料寫到新路徑 `<hash32>-<run_id>.parquet`，manifest 指向新路徑，壞檔留在原地成為孤兒並被回報
+> （v1.2.1：2026-10-25 run `20261025_140026_c169ddf` 中「移走後在同路徑重寫」的 82 個檔案在 Drive 上仍是 0-byte）。
+> 已被引用且未被判定毀損者照舊拒絕覆蓋。持久性只能在**重新掛載後**驗證：
 > `python -m tw_lake.audit.verify`（runner notebook 已自動執行）。故障注入見 `scripts/drive_fault_injection.py`。更新一個年分區就是產生新的檔案與新的 manifest 版本；舊檔永遠保留在磁碟與舊 manifest 中。
 
 Single-writer lock（`locks/writer.lock`，O_EXCL + heartbeat）；每次 manifest commit 前驗證 lock 仍屬本 run。
