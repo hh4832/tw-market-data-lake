@@ -357,3 +357,14 @@ def test_rescore_matches_runner_and_leaves_audit_untouched(tmp_cfg, clock, tmp_p
     assert after == before                                           # original audit files unchanged
     summ = json.loads((r1 / "rescore_summary.json").read_text(encoding="utf-8"))
     assert "research-ready" in summ["meta"]["statement"]
+
+
+def test_tolerant_without_close_auction_requirement():
+    from tw_lake.audit.readiness import research_ready
+    days = pd.DataFrame([_day("D", 10, "intraday_missing", 30, close_bar=False),
+                         _day("C", 10, "intraday_missing", 30, close_bar=False)])
+    rec = pd.DataFrame({"symbol": ["D", "C"], "date": pd.Timestamp("2024-02-20"),
+                        "classification": ["ok", "pending_verification"]})
+    on = research_ready(days, rec, set()).set_index("symbol")["ready_5m_no_trade_tolerant"]
+    off = research_ready(days, rec, set(), require_close_auction=False).set_index("symbol")["ready_5m_no_trade_tolerant"]
+    assert not on["D"] and off["D"] and not off["C"]

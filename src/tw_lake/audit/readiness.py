@@ -75,7 +75,10 @@ def _bucket_from_lots(lots: pd.Series) -> pd.Series:
 
 
 def research_ready(day_audit: pd.DataFrame, recon: pd.DataFrame, bad_partitions: set[str],
-                   allowance: dict[str, int | None] | None = None) -> pd.DataFrame:
+                   allowance: dict[str, int | None] | None = None,
+                   require_close_auction: bool = True) -> pd.DataFrame:
+    """require_close_auction=False: an illiquid day without a 13:30 auction trade is accepted when the
+    reconciliation is ok (which already requires the last 5m close == FinLab close)."""
     if len(day_audit) == 0:
         return pd.DataFrame(columns=READY_COLUMNS)
     allowance = dict(DEFAULT_MISSING_ALLOWANCE if allowance is None else allowance)
@@ -114,7 +117,8 @@ def research_ready(day_audit: pd.DataFrame, recon: pd.DataFrame, bad_partitions:
     within = cap_num.isna() | (x["missing_count"] <= cap_num.fillna(0))
     missing_day = x["quality_status"] == "intraday_missing"
     recon_ok = x["recon_classification"] == "ok"
-    tol_missing = missing_day & x["partition_ok"] & recon_ok & x["has_close_auction_bar"] & within
+    close_ok = x["has_close_auction_bar"] | (not require_close_auction)
+    tol_missing = missing_day & x["partition_ok"] & recon_ok & close_ok & within
     x["ready_5m_no_trade_tolerant"] = x["ready_5m_normal_session"] | tol_missing
     x["ready_30m_no_trade_tolerant"] = x["ready_5m_no_trade_tolerant"]
     x["tolerant_not_ready_reason"] = np.select(
@@ -122,7 +126,7 @@ def research_ready(day_audit: pd.DataFrame, recon: pd.DataFrame, bad_partitions:
          ~x["partition_ok"],
          ~missing_day & (x["quality_status"] != "complete"),
          ~recon_ok,                                                     # incl. complete days with suspect recon
-         ~x["has_close_auction_bar"],
+         ~close_ok,
          ~within],
         ["", "partition_integrity_failure", "5m_" + x["quality_status"].astype(str),
          "recon_" + x["recon_classification"].astype(str),
@@ -160,7 +164,8 @@ def _pct(k, n):
     return round(100.0 * k / n, 2) if n else None
 
 
-def readiness_summary(ready: pd.DataFrame, allowance: dict[str, int | None] | None = None) -> dict:
+def readiness_summary(ready: pd.DataFrame, allowance: dict[str, int | None] | None = None,
+                      require_close_auction: bool = True) -> dict:
     if len(ready) == 0:
         return {"rows": 0}
     n = len(ready)
@@ -176,6 +181,7 @@ def readiness_summary(ready: pd.DataFrame, allowance: dict[str, int | None] | No
                                 .value_counts().items()}
     if "ready_5m_no_trade_tolerant" in ready:
         out["missing_allowance"] = dict(DEFAULT_MISSING_ALLOWANCE if allowance is None else allowance)
+        out["require_close_auction"] = require_close_auction
         out["tolerant_not_ready_reasons"] = {
             k: int(v) for k, v in ready.loc[ready["tolerant_not_ready_reason"] != "", "tolerant_not_ready_reason"]
             .value_counts().items()}
