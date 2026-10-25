@@ -153,5 +153,7 @@
 | B8 5m→30m 重採樣 | 未做：AGENTS.md 規則 1 規定本 repo 不產出 30m 聚合；規格見第 7 節，建議放在研究 repo | — |
 | 稽核效能：regime / 處置矩陣向量化（~100 s → ~1 s） | 已實作 | `96959f9` |
 
+**F12（2026-10-25 下午，回補 run `20261025_140026_c169ddf`）**：recovery 正確偵測 83 個毀損檔並重抓（165 requests），但修復流程「把壞檔移到 quarantine，再在原路徑寫新檔」的 82 個 5m 檔在 Drive 上**仍是 0-byte**（Drive 上原路徑保留舊 file id、修改時間更新、大小 0）；同一 run 寫到新路徑的 40 個 universe 檔全部正常。結論：在 Drive FUSE 上，**被 rename/move 過的路徑不可再寫**。修正（v1.2.1）：壞檔不動，修復資料寫到 `<hash32>-<run_id>.parquet` 新路徑；故障注入 T1 新增 `move_then_same_path`（舊）與 `keep_bad_fresh_path`（新）兩種協定對照。
+
 **B1 的限制**：「不 rename 就不會出現 0-byte」目前是依證據推測，須以故障注入 notebook 在真實 Drive 上驗證（T1 比較新舊協定；T2/T3 用真實 store 程式碼）。
 即使新協定 PASS，每次 run 之後仍以重新掛載後的 verify 為準。

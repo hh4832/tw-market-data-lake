@@ -75,7 +75,8 @@ def version_checks(pv: PublishedVersion) -> list[dict]:
 def _check_one(pv: PublishedVersion, r, do_sha: bool, deep: bool) -> tuple[list[dict], tuple]:
     rows = []
     part, rel = r.partition, r.relpath
-    if not (rel.startswith(f"data/{part}/") and Path(rel).name == f"{str(r.content_hash)[:32]}.parquet"):
+    if not (rel.startswith(f"data/{part}/") and Path(rel).name.startswith(str(r.content_hash)[:32])
+            and rel.endswith(".parquet")):
         rows.append(_row(pv, part, rel, "path_matches_partition_and_hash", "fail", "warning", rel))
     fp = pv.data_path(rel)
     try:
