@@ -79,7 +79,8 @@ def qa_summary_md(rc: RunContext, status: str) -> str:
                   f"- outcomes: {m.get('outcomes')}", f"- conflicts: {m.get('conflicts')}  new bars: {m.get('new_bars')}  "
                   f"bars excluded outside listing span: {m.get('bars_excluded_outside_listing', 0)}",
                   f"- reconciliation status: **{recon.get('status', 'n/a')}**  {recon.get('by_classification', {})}",
-                  "  (vendor_definition_diff is informational; only data_error is a data failure)", ""]
+                  "  (pending_verification = unexplained volume/range difference, not a failure and not explained;"
+                  " only data_error is a data failure; reconciliation covers only ranges fetched in this run)", ""]
     rec = [r for r in i.get("recovery", []) if r.get("missing_files") or r.get("corrupt_files")
            or r.get("staging_quarantined") or r.get("pointer_missing_with_versions") or r.get("uncommitted_versions")]
     if rec or i.get("system_staging_quarantined"):

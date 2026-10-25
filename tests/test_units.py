@@ -220,7 +220,7 @@ def test_point_in_time_universe(cal):
 
 
 # ---------------------------------------------------------------- QA reconciliation
-def test_reconciliation_separates_vendor_diff_from_errors(cal):
+def test_reconciliation_separates_pending_from_errors(cal):
     fin = FakeFinlab()
     raw = load_raw_daily(fin, RAW_FIELDS)
     fub = FakeFubon(fin)
@@ -231,12 +231,25 @@ def test_reconciliation_separates_vendor_diff_from_errors(cal):
     m.loc[d16, "volume_raw"] = m.loc[d16, "volume_raw"] * 0.9                 # FinLab includes after-hours
     d17 = m["bar_start"].dt.date == date(2023, 8, 17)
     m.loc[d17 & (m["bar_start"].dt.minute == 0) & (m["bar_start"].dt.hour == 9), "high"] += 50   # impossible
+    d21 = (m["bar_start"].dt.date == date(2023, 8, 21)) & (m["bar_start"].dt.strftime("%H:%M") == "13:30")
+    m.loc[d21, ["close", "low"]] = m.loc[d21, "close"] - 0.5                 # closing auction != official close
     rec = reconcile_daily(daily_from_minute(m), raw, cal, ["2330"], date(2023, 8, 1), date(2023, 8, 31))
     by = rec.set_index("date")["classification"]
+    det = rec.set_index("date")["detail"]
     assert by[pd.Timestamp("2023-08-15")] == "missing_in_source"
-    assert by[pd.Timestamp("2023-08-16")] == "vendor_definition_diff"
+    assert by[pd.Timestamp("2023-08-16")] == "pending_verification"           # not auto-explained
+    assert "minute_volume_below_daily" in det[pd.Timestamp("2023-08-16")]
     assert by[pd.Timestamp("2023-08-17")] == "data_error"
+    assert by[pd.Timestamp("2023-08-21")] == "suspect" and "close_mismatch" in det[pd.Timestamp("2023-08-21")]
     assert by[pd.Timestamp("2023-08-18")] == "ok"
+    assert "vendor_definition_diff" not in set(rec["classification"])
+
+
+def test_merge_ranges():
+    from tw_lake.jobs_fubon import merge_ranges
+    r = merge_ranges([(date(2024, 1, 1), date(2024, 6, 30)), (date(2023, 7, 1), date(2023, 12, 31)),
+                      (date(2025, 1, 1), date(2025, 6, 30))])
+    assert r == [(date(2023, 7, 1), date(2024, 6, 30)), (date(2025, 1, 1), date(2025, 6, 30))]
 
 
 # ---------------------------------------------------------------- FinLab raw immutability

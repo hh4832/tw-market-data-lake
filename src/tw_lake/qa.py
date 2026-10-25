@@ -2,20 +2,21 @@
 
 Two levels:
   * window_qa(): gate used before a window may be marked complete (hard failures vs source gaps)
-  * reconcile_daily(): run-level 5m vs FinLab daily reconciliation that separates
-      data_error                   internally inconsistent / impossible data
+  * reconcile_daily(): run-level 5m vs FinLab daily reconciliation, only over the date ranges
+    actually fetched in this run, that separates
+      data_error                   impossible data (5m high/low outside the daily range)
       missing_in_source            FinLab says traded, Fubon has no bars that day
-      vendor_definition_diff       explainable by differing definitions (e.g. FinLab daily volume
-                                   includes after-hours fixed-price / block trades; daily high/low
-                                   may come from auction prints) -- informational, not a gap
-      suspect                      not explainable either way; needs a human look
+      suspect                      close/open mismatch, 5m volume above daily, bars without a FinLab trade
+      pending_verification         5m volume below the band or daily range wider than 5m range.
+                                   NOT auto-explained as a vendor definition difference (audit
+                                   2026-10-25): FinLab's volume definition is unverified.
     A volume mismatch alone is never classified as missing data.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import date, time
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -91,7 +92,11 @@ def reconcile_daily(minute_daily: pd.DataFrame, finlab_daily: pd.DataFrame, cal:
     fd = fd[(fd["symbol"].isin(symbols)) & (fd["date"] >= pd.Timestamp(start)) & (fd["date"] <= pd.Timestamp(end))]
     days = pd.DatetimeIndex(pd.to_datetime(cal.trading_days_between(start, end)))
     grid = pd.MultiIndex.from_product([sorted(symbols), days], names=["symbol", "date"]).to_frame(index=False)
-    r = grid.merge(fd[["symbol", "date", "high", "low", "volume_shares"]], on=["symbol", "date"], how="left")
+    cols = [c for c in ("open", "high", "low", "close", "volume_shares") if c in fd.columns]
+    r = grid.merge(fd[["symbol", "date", *cols]], on=["symbol", "date"], how="left")
+    for c in ("open", "close"):
+        if c not in r.columns:
+            r[c] = np.nan
     md = minute_daily.copy()
     if len(md):
         md["date"] = pd.to_datetime(md["date"]).dt.normalize()
@@ -111,23 +116,26 @@ def reconcile_daily(minute_daily: pd.DataFrame, finlab_daily: pd.DataFrame, cal:
     c_extra = ~f_trade & m_has
     both = f_trade & m_has
     c_err = both & ((mh > hi + price_tol) | (ml < lo - price_tol))
-    c_volhi = both & ~c_err & (ratio > ratio_ok[1])
+    close_mm = both & r["close"].notna() & ((r["m_close"] - r["close"]).abs() > price_tol)
+    open_mm = both & r["open"].notna() & ((r["m_open"] - r["open"]).abs() > price_tol)
+    c_volhi = both & (ratio > ratio_ok[1])
+    c_susp = both & ~c_err & (c_volhi | close_mm | open_mm)
     wider = (mh < hi - price_tol) | (ml > lo + price_tol)
     vollo = ratio < ratio_ok[0]
-    c_diff = both & ~c_err & ~c_volhi & (wider | vollo)
-    conds = [c_none, c_missing, c_extra, c_err, c_volhi, c_diff]
+    c_pend = both & ~c_err & ~c_susp & (wider | vollo)
+    conds = [c_none, c_missing, c_extra, c_err, c_susp, c_pend]
     cls = np.select(conds, ["no_trade_expected", "missing_in_source", "suspect", "data_error", "suspect",
-                            "vendor_definition_diff"], default="ok")
+                            "pending_verification"], default="ok")
     sev = np.select(conds, ["info", "warning", "warning", "error", "warning", "info"], default="info")
     ratio_txt = ratio.map(lambda v: "" if pd.isna(v) else f"{v:.4f}")
-    diff_detail = (np.where(wider, "daily_range_wider_than_minute", "")
-                   + np.where(wider & vollo, ";", "")
-                   + np.where(vollo, "minute_volume_below_daily ratio=" + ratio_txt, ""))
-    detail = np.select(
-        [c_extra, c_err, c_volhi, c_diff],
-        ["bars_without_finlab_trade", "minute_range_outside_daily_range",
-         "minute_volume_exceeds_daily ratio=" + ratio_txt, pd.Series(diff_detail, index=r.index)],
-        default="")
+    parts = [(c_extra, "bars_without_finlab_trade"), (c_err, "minute_range_outside_daily_range"),
+             (close_mm, "close_mismatch"), (open_mm, "open_mismatch"),
+             (c_volhi, "minute_volume_exceeds_daily ratio=" + ratio_txt),
+             (both & wider, "daily_range_wider_than_minute"),
+             (both & vollo, "minute_volume_below_daily ratio=" + ratio_txt)]
+    detail = pd.Series("", index=r.index, dtype=object)
+    for mask, text in parts:
+        detail = detail.where(~mask, detail + np.where(detail == "", "", ";") + text)
     r["classification"], r["severity"], r["detail"] = cls, sev, detail
     return r
 
@@ -142,6 +150,7 @@ def summarize(rec: pd.DataFrame) -> dict:
         "symbols_with_data_error": sorted(rec.loc[rec["classification"] == "data_error", "symbol"].unique().tolist())[:50],
         "symbols_with_missing_in_source": sorted(rec.loc[rec["classification"] == "missing_in_source", "symbol"].unique().tolist())[:50],
         "status": "fail" if vc.get("data_error", 0) else ("warn" if vc.get("missing_in_source", 0) or vc.get("suspect", 0) else "pass"),
+        "note": "pending_verification = unexplained volume/range difference (not counted as failure, not explained)",
     }
 
 

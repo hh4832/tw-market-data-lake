@@ -5,7 +5,7 @@ import itertools
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import timedelta
 
 import pandas as pd
 from tqdm.auto import tqdm
@@ -25,6 +25,17 @@ from .windows import (COMPLETE, COMPLETE_WITH_GAPS, CONFLICT, DATA_DONE, FAILED,
                       pre_request_skip)
 
 CONFLICT_COLUMNS = ["detected_run_id", "symbol", "partition", "key", "detail"]
+
+
+def merge_ranges(ranges) -> list[tuple]:
+    """Merge overlapping/adjacent (from, to) date ranges."""
+    out: list[list] = []
+    for a, b in sorted(ranges):
+        if out and a <= out[-1][1] + timedelta(days=1):
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
 
 
 @dataclass
@@ -259,9 +270,9 @@ class FubonJob:
             self.delta_rows.append({"symbol": sym, "partition": part, "bars_added": int(n_added),
                                     "min_bar": str(new["bar_start"].min()), "max_bar": str(new["bar_start"].max())})
             self.minute_daily.append(daily_from_minute(new))
-            lo, hi = self.recon_ranges.get(sym, (None, None))
-            a, b = min(o.task.fetch_from for o in grp), max(o.task.fetch_to for o in grp)
-            self.recon_ranges[sym] = (a if lo is None else min(lo, a), b if hi is None else max(hi, b))
+            # reconcile only the ranges fetched in this run (audit F5: min..max over all fetched
+            # windows produced false missing_in_source for windows that were not re-fetched)
+            self.recon_ranges.setdefault(sym, []).extend((o.task.fetch_from, o.task.fetch_to) for o in grp)
         for o in outcomes:
             self._apply(o)
 
@@ -379,15 +390,17 @@ class FubonJob:
         md_by = dict(tuple(md.groupby("symbol"))) if len(md) else {}
         raw = self.fin.raw
         raw = raw[(raw["date"] >= pd.Timestamp(rc.cfg.minute_start)) & raw["symbol"].isin(list(self.recon_ranges))]
-        raw_by = dict(tuple(raw[["date", "symbol", "high", "low", "volume_shares"]].groupby("symbol")))
-        empty_raw = raw.iloc[0:0][["date", "symbol", "high", "low", "volume_shares"]]
+        rcols = ["date", "symbol", "open", "high", "low", "close", "volume_shares"]
+        raw_by = dict(tuple(raw[rcols].groupby("symbol")))
+        empty_raw = raw.iloc[0:0][rcols]
         recs = []
         q = rc.cfg.qa
-        for sym, (a, b) in sorted(self.recon_ranges.items()):
+        for sym, ranges in sorted(self.recon_ranges.items()):
             part = md_by.get(sym, md.iloc[0:0] if len(md) else md)
-            recs.append(reconcile_daily(part, raw_by.get(sym, empty_raw), self.fin.calendar, [sym], a, b,
-                                        (float(q["volume_ratio_ok_low"]), float(q["volume_ratio_ok_high"])),
-                                        float(q["price_tolerance"])))
+            for a, b in merge_ranges(ranges):
+                recs.append(reconcile_daily(part, raw_by.get(sym, empty_raw), self.fin.calendar, [sym], a, b,
+                                            (float(q["volume_ratio_ok_low"]), float(q["volume_ratio_ok_high"])),
+                                            float(q["price_tolerance"])))
         rec = pd.concat(recs, ignore_index=True) if recs else pd.DataFrame()
         rc.add_table("qa_reconciliation_5m", rec)
         self.recon_summary = summarize(rec)
