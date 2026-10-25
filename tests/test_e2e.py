@@ -183,6 +183,45 @@ def test_source_gap_partial_then_complete_with_gaps(tmp_cfg, clock):
     assert w.loc[("2330", "2023-07"), "status"] == "complete_with_gaps"   # gap_retry_limit=2, same gap
 
 
+def test_authorized_refetch_of_complete_with_gaps_window(tmp_cfg, clock):
+    gap = date(2023, 8, 15)
+    fin = FakeFinlab()
+    fub = FakeFubon(fin)
+    fub.missing_days = {"2330": {gap}}
+    run(tmp_cfg, clock, fin, fub)
+    clock.set(datetime(2024, 3, 29, 18, 0, tzinfo=TAIPEI))
+    fub2 = FakeFubon(fin)
+    fub2.missing_days = fub.missing_days
+    run(tmp_cfg, clock, fin, fub2, mode="update")
+    assert windows(tmp_cfg, clock).set_index(["symbol", "window_id"]).loc[("2330", "2023-07"), "status"] \
+        == "complete_with_gaps"
+    # plain update never re-opens a complete_with_gaps window
+    clock.set(datetime(2024, 3, 29, 19, 0, tzinfo=TAIPEI))
+    fub3 = FakeFubon(fin)
+    run(tmp_cfg, clock, fin, fub3, mode="update")
+    assert not [c for c in fub3.calls if c["symbol"] == "2330" and c["from"] == "2023-07-01"]
+    # source still missing -> stays complete_with_gaps, nothing else changes
+    clock.set(datetime(2024, 3, 29, 20, 0, tzinfo=TAIPEI))
+    fub4 = FakeFubon(fin)
+    fub4.missing_days = fub.missing_days
+    run(tmp_cfg, clock, fin, fub4, mode="update", extra=("--refetch-gap-days", "2330:2023-08-15,0050:2023-08-15"))
+    assert [c for c in fub4.calls if c["symbol"] == "2330" and c["from"] == "2023-07-01"]
+    assert not [c for c in fub4.calls if c["symbol"] == "0050" and c["from"] == "2023-07-01"]   # not a listed gap
+    w = windows(tmp_cfg, clock).set_index(["symbol", "window_id"])
+    assert w.loc[("2330", "2023-07"), "status"] == "complete_with_gaps"
+    # source now has the day -> merged, window complete, no conflicts
+    clock.set(datetime(2024, 3, 29, 21, 0, tzinfo=TAIPEI))
+    fub5 = FakeFubon(fin)
+    assert run(tmp_cfg, clock, fin, fub5, mode="update", extra=("--refetch-gap-days", "2330:2023-08-15")) == 0
+    w = windows(tmp_cfg, clock).set_index(["symbol", "window_id"])
+    assert w.loc[("2330", "2023-07"), "status"] == "complete" and pd.isna(w.loc[("2330", "2023-07"), "gap_days"])
+    t = store(tmp_cfg, clock).tables()
+    assert len(t["conflicts_log"]) == 0
+    p = t["partitions"].set_index("partition").loc["symbol=2330/year=2023"]
+    bars = pd.read_parquet(tmp_cfg.data_root / "fubon_stock_5m" / p["relpath"])
+    assert (bars["bar_start"].dt.tz_convert("Asia/Taipei").dt.date == gap).sum() == 54
+
+
 def test_conflict_keeps_published_value(tmp_cfg, clock):
     fin = FakeFinlab()
     assert run(tmp_cfg, clock, fin, FakeFubon(fin)) == 0

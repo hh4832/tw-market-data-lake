@@ -147,14 +147,19 @@ def is_exhausted(row: pd.Series, max_window_attempts: int) -> bool:
 
 def plan_tasks(windows: pd.DataFrame, new_keys: set, latest_available: date, max_window_attempts: int,
                retry_conflicts: bool = False, retry_exhausted: bool = False,
-               symbols: list[str] | None = None) -> tuple[list[FetchTask], dict]:
+               symbols: list[str] | None = None,
+               refetch_windows: set[tuple[str, str]] | None = None) -> tuple[list[FetchTask], dict]:
     """Repair first (failed, partial, pre-existing pending, optionally conflicts) for ALL symbols,
-    then extend completed windows and fetch brand-new windows."""
+    then extend completed windows and fetch brand-new windows.
+    refetch_windows: explicitly authorized (symbol, window_id) pairs whose complete_with_gaps window is
+    re-fetched in full as a repair (merge keeps published bars; differing bars become conflicts)."""
+    refetch_windows = refetch_windows or set()
     w = normalize_windows(windows)
     if symbols is not None:
         w = w[w["symbol"].isin(set(symbols))]
     repair, later = [], []
-    stats = {"repair": 0, "extend": 0, "new": 0, "skipped_exhausted": 0, "held_conflict": 0, "up_to_date": 0}
+    stats = {"repair": 0, "extend": 0, "new": 0, "skipped_exhausted": 0, "held_conflict": 0, "up_to_date": 0,
+             "refetch_gaps": 0}
     for _, r in w.iterrows():
         ws, we = r["window_start"].date(), r["window_end"].date()
         if ws > latest_available:
@@ -173,6 +178,10 @@ def plan_tasks(windows: pd.DataFrame, new_keys: set, latest_available: date, max
         if st == PENDING and key in new_keys:
             later.append(mk(ws, target_end, "new"))
             stats["new"] += 1
+            continue
+        if key in refetch_windows and st == COMPLETE_WITH_GAPS:
+            repair.append(mk(ws, target_end, "repair"))
+            stats["refetch_gaps"] += 1
             continue
         if st in REPAIR_STATUSES:
             if is_exhausted(r, max_window_attempts) and not retry_exhausted:

@@ -13,6 +13,7 @@ import json
 import sys
 import time
 import traceback
+from datetime import date
 from typing import Callable
 
 import pandas as pd
@@ -45,9 +46,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--break-stale-lock", action="store_true")
     p.add_argument("--retry-conflicts", action="store_true")
     p.add_argument("--retry-exhausted", action="store_true")
+    p.add_argument("--refetch-gap-days", default=None,
+                   help="authorized source-gap refetch, e.g. 00720B:2025-06-23,3454:2026-03-30 "
+                        "(re-fetches each complete_with_gaps window that lists the day)")
     p.add_argument("--deep-verify", action="store_true", help="SHA256-verify every published file")
     p.add_argument("--skip-fubon-master", action="store_true", help="skip the current-day tickers flag snapshot")
     return p
+
+
+def parse_refetch(spec: str | None) -> list[tuple[str, str]] | None:
+    if not spec:
+        return None
+    out = []
+    for item in spec.split(","):
+        sym, _, day = item.strip().partition(":")
+        if not sym or not day:
+            raise ConfigError(f"--refetch-gap-days item {item!r} must be SYMBOL:YYYY-MM-DD")
+        out.append((sym.strip(), date.fromisoformat(day.strip()).isoformat()))
+    return out
 
 
 def pick_pilot_symbols(cfg, targets: pd.DataFrame) -> list[str]:
@@ -119,7 +135,8 @@ def main(argv: list[str] | None = None, finlab_factory: Callable | None = None,
             sctx = StoreContext(rc.layout, rc.run_id, cfg.local_tmp, clock, lock=None)
             if args.mode == "pilot" and not symbols:
                 symbols = pick_pilot_symbols(cfg, fin.targets)
-            rc.info["fubon_5m"] = FubonJob(rc, sctx, None, fin, symbols=symbols, dry_run=True).run()
+            rc.info["fubon_5m"] = FubonJob(rc, sctx, None, fin, symbols=symbols, dry_run=True,
+                                           refetch_gap_days=parse_refetch(args.refetch_gap_days)).run()
             status = "success"
         else:
             if args.mode == "full" and not args.confirm_full:
@@ -144,6 +161,7 @@ def main(argv: list[str] | None = None, finlab_factory: Callable | None = None,
             with rc.stage("fubon: 5m ingestion"):
                 res = FubonJob(rc, sctx, client, fin, symbols=symbols, max_requests=args.max_requests,
                                retry_conflicts=args.retry_conflicts, retry_exhausted=args.retry_exhausted,
+                               refetch_gap_days=parse_refetch(args.refetch_gap_days),
                                sleep=sleep, monotonic=monotonic).run()
             rc.info["fubon_5m"] = res
             bad = {k: v for k, v in (res.get("outcomes") or {}).items()

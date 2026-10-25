@@ -62,6 +62,7 @@ class FubonJob:
     dry_run: bool = False
     retry_conflicts: bool = False
     retry_exhausted: bool = False
+    refetch_gap_days: list[tuple[str, str]] | None = None   # authorized (symbol, YYYY-MM-DD) source-gap refetches
     sleep: callable = time.sleep
     monotonic: callable = time.monotonic
     # state
@@ -108,13 +109,15 @@ class FubonJob:
         self.latest = latest = cal.latest_available_date(rc.clock, f["data_ready_hhmm"])
         windows, new_keys = ensure_windows(windows, list(targets["symbol"]), cfg.minute_start, latest,
                                            int(f["window_months"]))
+        refetch, self.refetch_report = self._resolve_refetch(windows)
         tasks, stats = plan_tasks(windows, new_keys, latest, int(f["max_window_attempts"]),
-                                  self.retry_conflicts, self.retry_exhausted, list(targets["symbol"]))
+                                  self.retry_conflicts, self.retry_exhausted, list(targets["symbol"]), refetch)
         n_req = sum(1 for t in tasks if not pre_request_skip(cal, t.symbol, t.fetch_from, t.fetch_to))
         plan_df = pd.DataFrame([t.__dict__ for t in tasks])
         rc.add_table("plan", plan_df)
         est_min = n_req / max(1, int(f["historical_requests_per_min"]))
         summary = {"latest_available_date": latest.isoformat(), "targets": int(len(targets)),
+                   "refetch_gap_days": self.refetch_report,
                    "plan": stats, "tasks": len(tasks), "estimated_requests": n_req,
                    "estimated_minutes": round(est_min, 1)}
         rc.log.info("5m plan: %s", json.dumps(summary, ensure_ascii=False))
@@ -176,6 +179,26 @@ class FubonJob:
         return summary
 
     # ------------------------------------------------------------------------------------
+    def _resolve_refetch(self, windows: pd.DataFrame) -> tuple[set, list[dict]]:
+        """Map requested (symbol, day) to windows; only complete_with_gaps windows that list the day."""
+        keys, report = set(), []
+        for sym, day in self.refetch_gap_days or []:
+            d = pd.Timestamp(day)
+            m = windows[(windows["symbol"] == sym) & (windows["window_start"] <= d) & (windows["window_end"] >= d)]
+            if m.empty:
+                report.append({"symbol": sym, "date": day, "window_id": None, "action": "skipped_no_window"})
+                continue
+            r = m.iloc[0]
+            gaps = json.loads(r["gap_days"]) if isinstance(r["gap_days"], str) and r["gap_days"] else []
+            if r["status"] != COMPLETE_WITH_GAPS or day not in gaps:
+                report.append({"symbol": sym, "date": day, "window_id": r["window_id"],
+                               "action": f"skipped_status_{r['status']}" if r["status"] != COMPLETE_WITH_GAPS
+                               else "skipped_day_not_a_listed_gap"})
+                continue
+            keys.add((sym, r["window_id"]))
+            report.append({"symbol": sym, "date": day, "window_id": r["window_id"], "action": "refetch_window"})
+        return keys, report
+
     def _log_calls(self, t: FetchTask, n_rows: int | None):
         for r in self.caller.records:
             self.request_log.append({

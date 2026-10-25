@@ -109,7 +109,7 @@ turnover, turnover_present, timeframe, bar_label_assumption, adjusted=False, sou
 | `update` | 正式 dataset | 需已有 5m manifest；repair-first 後增量 |
 
 共用旗標：`--dry-run`（不寫 dataset／manifest）、`--symbols`、`--max-requests`、`--break-stale-lock`、
-`--retry-conflicts`、`--retry-exhausted`、`--deep-verify`、`--skip-fubon-master`。
+`--retry-conflicts`、`--retry-exhausted`、`--refetch-gap-days SYM:YYYY-MM-DD,...`（經授權才用：重抓列出該缺口日的 complete_with_gaps 視窗；合併時保留已發布 bars，不一致的列入 conflict）、`--deep-verify`、`--skip-fubon-master`。
 
 ## 8. 測試 ⑨
 
