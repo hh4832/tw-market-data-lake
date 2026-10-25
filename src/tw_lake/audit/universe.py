@@ -124,9 +124,11 @@ def excluded_bars_audit(excl: pd.DataFrame, trading_days: list) -> pd.DataFrame:
 
 
 def rejected_window_bars(quarantine_dir: Path) -> pd.DataFrame:
-    """QA-rejected windows quarantined by ingestion (full raw windows incl. emerging bars), if any."""
+    """Raw bars kept in quarantine: QA-rejected windows and (since B7) every excluded bar."""
     frames = []
-    for f in sorted(glob.glob(str(quarantine_dir / "*" / "fubon_5m_qa_rejected" / "*.parquet"))):
+    files = glob.glob(str(quarantine_dir / "*" / "fubon_5m_qa_rejected" / "*.parquet")) + \
+        glob.glob(str(quarantine_dir / "*" / "fubon_5m_excluded_outside_listing" / "*.parquet"))   # B7
+    for f in sorted(files):
         try:
             df = pd.read_parquet(f)
         except Exception:  # noqa: BLE001

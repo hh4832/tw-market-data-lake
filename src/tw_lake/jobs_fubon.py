@@ -22,7 +22,7 @@ from .run_context import RunContext
 from .store import DatasetStore, StoreContext, upsert_partition_records
 from .windows import (COMPLETE, COMPLETE_WITH_GAPS, CONFLICT, DATA_DONE, FAILED, PARTIAL, FetchTask,
                       classify_no_data, coverage_by_symbol, ensure_windows, normalize_windows, plan_tasks,
-                      pre_request_skip)
+                      pre_request_skip, with_quality_status)
 
 CONFLICT_COLUMNS = ["detected_run_id", "symbol", "partition", "key", "detail"]
 
@@ -290,13 +290,34 @@ class FubonJob:
         n_out = int((~keep).sum())
         if n_out:
             dropped = df.loc[~keep, "bar_start"]
+            saved = self._save_excluded(o, df.loc[~keep])
             self.excluded_rows.append({
+                "saved_to": saved,
                 "symbol": o.task.symbol, "window_id": o.task.window_id, "bars_excluded": n_out,
                 "first_excluded": str(dropped.min()), "last_excluded": str(dropped.max()),
                 "first_price_date": str(facts.first_price_date), "last_price_date": str(facts.last_price_date),
                 "reason": "outside_listing_span (e.g. emerging board before IPO)",
             })
         return df.loc[keep].reset_index(drop=True)
+
+    def _save_excluded(self, o: TaskOutcome, rows: pd.DataFrame) -> str | None:
+        """B7: keep every excluded (outside listing span) bar for later review; never published."""
+        from .store import _durable_write
+        try:
+            lay = self.rc.layout
+            dest = lay.quarantine / self.rc.run_id / "fubon_5m_excluded_outside_listing" / \
+                f"{o.task.symbol}_{o.task.window_id}_{o.task.fetch_from}_{o.task.fetch_to}.parquet"
+            lay.assert_writable(dest)
+            local = self.sctx.tmp_dir() / f"excluded_{dest.name}"
+            rows.to_parquet(local, index=False)
+            if dest.exists():
+                return str(dest)
+            _durable_write(local, dest)
+            local.unlink(missing_ok=True)
+            return str(dest)
+        except Exception as e:  # noqa: BLE001 - diagnostics only
+            self.rc.log.warning("could not save excluded bars %s %s: %r", o.task.symbol, o.task.window_id, e)
+            return None
 
     def _quarantine_rejected(self, o: TaskOutcome) -> None:
         """Keep QA-rejected source data for inspection (never published, never deleted)."""
@@ -373,8 +394,12 @@ class FubonJob:
         meta = {"window_months": int(f["window_months"]), "minute_start": self.rc.cfg.minute_start.isoformat(),
                 "latest_available_date": self.latest.isoformat(), "data_max_date": self.latest.isoformat(),
                 "bar_label_assumption": f["bar_label"], "fields_requested": list(f["fields"]),
-                "turnover_note": "null when Fubon minute responses omit turnover; never derived"}
-        self.store.commit({"partitions": self.parts, "coverage_by_window": self.windows,
+                "turnover_note": "null when Fubon minute responses omit turnover; never derived",
+                "status_semantics": {"status": "download/coverage status",
+                                     "data_quality_status": "derived; complete_with_gaps = source gap confirmed by "
+                                                            "repeat, not complete; intraday completeness unverified",
+                                     "research_ready": "decided by the read-only audit (audit_research_ready)"}}
+        self.store.commit({"partitions": self.parts, "coverage_by_window": with_quality_status(self.windows),
                            "coverage_by_symbol": cov_sym, "conflicts_log": conf}, meta)
         self.rc.log.info("manifest committed: fubon_5m seq=%s", (self.store.pointer() or {}).get("seq"))
 

@@ -389,3 +389,6 @@ def test_emerging_board_bars_before_listing_are_excluded(tmp_cfg, clock):
     runs = sorted((tmp_cfg.data_root / "_tw-market-data-lake" / "runs").iterdir())
     ex = pd.read_parquet(runs[-1] / "excluded_outside_listing_5m.parquet")
     assert ex.set_index("symbol").loc["9999", "bars_excluded"] == 9
+    saved = pd.read_parquet(ex.set_index("symbol").loc["9999", "saved_to"])        # B7: per-bar rows kept
+    assert len(saved) == 9 and saved["bar_start"].dt.strftime("%H:%M").max() == "14:55"
+    assert "quarantine" in ex.set_index("symbol").loc["9999", "saved_to"]
