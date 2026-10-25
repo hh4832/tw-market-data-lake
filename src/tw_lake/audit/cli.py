@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from ..config import load_config
+from .readiness import parse_allowance
 from .runner import AuditOptions, run_audit
 
 
@@ -26,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sha-sample", type=int, default=20, help="random published files per dataset to SHA256")
     p.add_argument("--template-symbols", default="2330,0050,006208")
     p.add_argument("--volume-ratio-band", default="0.95,1.02")
+    p.add_argument("--missing-allowance", default=None,
+                   help="readiness v0.2, e.g. ge5000_lots=0,500_5000_lots=3,50_500_lots=15,lt50_lots=none")
     p.add_argument("--no-progress", action="store_true")
     return p
 
@@ -39,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         max_partitions=a.max_partitions, deep_verify=a.deep_verify, sha_sample=a.sha_sample,
         template_symbols=tuple(s.strip() for s in a.template_symbols.split(",")), volume_ratio_band=(lo, hi),
         publish_dir=(cfg.data_root / cfg.raw["system_dir"] / "audits") if a.publish_to_drive else None,
+        missing_allowance=parse_allowance(a.missing_allowance),
         progress=not a.no_progress)
     out = run_audit(cfg, opts)
     print(f"audit written to {out}")

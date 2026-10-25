@@ -281,3 +281,79 @@ def test_vectorized_partition_audit_matches_reference(tmp_cfg, clock, tmp_path):
         a = A2.audit_symbol_partition(df, sym, fd, tm, rg, set(tds), part, 1).reset_index(drop=True)
         b = A2._audit_symbol_partition_reference(df, sym, fd, tm, rg, set(tds), part, 1).reset_index(drop=True)
         pd.testing.assert_frame_equal(a, b, check_dtype=False, check_exact=False)
+
+
+# ---- readiness v0.2 (no-trade tolerant) ------------------------------------------------------
+def _day(symbol, lots, status, missing, close_bar=True, partition="p"):
+    return {"symbol": symbol, "date": pd.Timestamp("2024-02-20"), "quality_status": status, "partition": partition,
+            "finlab_volume_lots": lots, "regime": "normal", "liquidity_bucket": A2.liquidity_bucket(pd.Series([lots]))[0],
+            "missing_count": missing, "has_close_auction_bar": close_bar}
+
+
+def test_tolerant_readiness_rules():
+    from tw_lake.audit.readiness import missing_by_liquidity, readiness_summary, research_ready
+    days = pd.DataFrame([
+        _day("A", 20000, "intraday_missing", 1),            # liquid: a missing bar is not believable as no-trade
+        _day("B", 10, "intraday_missing", 30),              # illiquid, clean recon -> tolerant
+        _day("C", 10, "intraday_missing", 30),              # illiquid, volume below band -> rejected
+        _day("D", 10, "intraday_missing", 30, close_bar=False),
+        _day("E", 200, "intraday_missing", 16),             # 50_500 bucket allows 15
+        _day("F", 200, "intraday_missing", 15),
+        _day("G", 20000, "complete", 0),
+        _day("H", 10, "intraday_missing", 5, partition="bad"),
+        _day("I", 10, "regime_call_auction_unverified", 0),
+        _day("J", 20000, "complete", 0),                    # complete but suspect recon
+    ])
+    rec = pd.DataFrame({"symbol": list("ABCDEFGHIJ"), "date": pd.Timestamp("2024-02-20"),
+                        "classification": ["ok", "ok", "pending_verification", "ok", "ok", "ok", "pending_verification",
+                                           "ok", "ok", "suspect"]})
+    r = research_ready(days, rec, {"bad"}).set_index("symbol")
+    tol = r["ready_5m_no_trade_tolerant"]
+    assert tol.to_dict() == {"A": False, "B": True, "C": False, "D": False, "E": False, "F": True, "G": True,
+                             "H": False, "I": False, "J": False}
+    assert (r["ready_30m_no_trade_tolerant"] == tol).all()
+    assert (~r["ready_5m_normal_session"] | tol).all()                # superset of strict
+    reasons = r["tolerant_not_ready_reason"]
+    assert reasons["A"] == "missing_over_allowance_ge5000_lots" and reasons["C"] == "recon_pending_verification"
+    assert reasons["D"] == "no_close_auction_bar" and reasons["H"] == "partition_integrity_failure"
+    assert reasons["I"] == "5m_regime_call_auction_unverified" and reasons["J"] == "recon_suspect"
+    assert r.loc["G", "ready_5m_normal_session"] and not r.loc["B", "ready_5m_normal_session"]
+    s = readiness_summary(r.reset_index())
+    assert s["ready_5m_no_trade_tolerant"]["count"] == 3 and s["by_liquidity_bucket"]["lt50_lots"]["tolerant_pct"] == 20.0
+    h = missing_by_liquidity(r.reset_index())
+    assert h["days"].sum() == 9 and set(h["liquidity_bucket"]) == {"ge5000_lots", "50_500_lots", "lt50_lots"}
+
+
+def test_parse_allowance():
+    from tw_lake.audit.readiness import DEFAULT_MISSING_ALLOWANCE, parse_allowance
+    assert parse_allowance(None) == DEFAULT_MISSING_ALLOWANCE
+    a = parse_allowance("500_5000_lots=0,lt50_lots=none")
+    assert a["500_5000_lots"] == 0 and a["lt50_lots"] is None and a["ge5000_lots"] == 0
+    with pytest.raises(ValueError):
+        parse_allowance("bogus=1")
+
+
+def test_rescore_matches_runner_and_leaves_audit_untouched(tmp_cfg, clock, tmp_path):
+    from tw_lake.audit.rescore import rescore
+    hole = date(2024, 2, 20)
+    build_lake(tmp_cfg, clock, lambda f: f.drop_bars.add(("2330", hole, "10:05")))
+    out, s = audit(tmp_cfg, tmp_path)
+    before = tree_snapshot(out)
+    key = ("2330", pd.Timestamp(hole))
+    runner_ready = table(out, "audit_research_ready").set_index(["symbol", "date"]).sort_index()
+    # fake 2330 trades ~1,000 lots (500_5000 bucket, allowance 3) and the dropped bar holds <2% of the
+    # volume, so the volume band cannot see it: tolerant accepts it - the documented limitation.
+    assert runner_ready.loc[key, "ready_5m_no_trade_tolerant"] and not runner_ready.loc[key, "ready_5m_normal_session"]
+    assert "ready_5m_no_trade_tolerant" in s["findings"]["readiness"]
+    r1 = rescore(out)
+    again = pd.read_parquet(r1 / "audit_research_ready.parquet").set_index(["symbol", "date"]).sort_index()
+    pd.testing.assert_frame_equal(again, runner_ready, check_dtype=False)
+    r2 = rescore(out, tmp_path / "strict_rescore", {"ge5000_lots": 0, "500_5000_lots": 0, "50_500_lots": 15,
+                                                    "lt50_lots": None})
+    strict = pd.read_parquet(r2 / "audit_research_ready.parquet").set_index(["symbol", "date"])
+    assert not strict.loc[key, "ready_5m_no_trade_tolerant"]
+    assert strict.loc[key, "tolerant_not_ready_reason"] == "missing_over_allowance_500_5000_lots"
+    after = {k: v for k, v in tree_snapshot(out).items() if not k.startswith("rescore_")}
+    assert after == before                                           # original audit files unchanged
+    summ = json.loads((r1 / "rescore_summary.json").read_text(encoding="utf-8"))
+    assert "research-ready" in summ["meta"]["statement"]

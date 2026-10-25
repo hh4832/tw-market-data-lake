@@ -20,7 +20,7 @@ from . import gaps as A5
 from . import integrity as A1
 from . import recon as A3
 from . import universe as A4
-from .readiness import readiness_summary, research_ready
+from .readiness import missing_by_liquidity, readiness_summary, research_ready
 from .reader import PublishedVersion, control_files, diff_fingerprints, fingerprint, load_published
 from .regime import matrix_agreement, trading_regime_daily
 from .report import write_reports
@@ -44,6 +44,7 @@ class AuditOptions:
     sha_sample: int = 20
     template_symbols: tuple[str, ...] = ("2330", "0050", "006208")
     volume_ratio_band: tuple[float, float] = (0.95, 1.02)
+    missing_allowance: dict | None = None      # readiness v0.2; None = readiness.DEFAULT_MISSING_ALLOWANCE
     publish_dir: Path | None = None
     seed: int = 20261025
     progress: bool = True
@@ -262,7 +263,7 @@ def run_audit(cfg: Config, opts: AuditOptions) -> Path:
     backfill = A5.backfill_candidates(integ_df, windows) if len(windows) else pd.DataFrame()
 
     # ---- readiness -----------------------------------------------------------------------
-    ready = research_ready(day_audit, rec_df, bad)
+    ready = research_ready(day_audit, rec_df, bad, opts.missing_allowance)
 
     # ---- outputs ---------------------------------------------------------------------------
     tables = {
@@ -280,6 +281,7 @@ def run_audit(cfg: Config, opts: AuditOptions) -> Path:
         "audit_backfill_candidates": backfill,
         "trading_regime_daily": regime,
         "audit_research_ready": ready,
+        "audit_5m_missing_by_liquidity": missing_by_liquidity(ready),
     }
     for name, df in tables.items():
         if df is not None and len(df.columns):
@@ -292,7 +294,7 @@ def run_audit(cfg: Config, opts: AuditOptions) -> Path:
     findings = {
         "handoff_reconstruction": A1.reconstruct_handoff(pv5),
         "recon_summary": A3.summarize(rec_df, day_audit),
-        "readiness": readiness_summary(ready),
+        "readiness": readiness_summary(ready, opts.missing_allowance),
         "regime_matrix_agreement": regime_checks,
         "source_unchanged": {"control_files": len(hash_set) + len(stat_set), "data_files_stat": len(data_paths),
                              "changed": (changes + data_changes)[:50], "ok": not changes and not data_changes,
