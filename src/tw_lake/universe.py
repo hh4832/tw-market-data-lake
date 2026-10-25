@@ -144,8 +144,8 @@ def universe_daily_v2(uni_v1: pd.DataFrame) -> pd.DataFrame:
     For pre-open selection on date D use only *_prev_day / listed_trading_days_before columns."""
     u = uni_v1.sort_values(["symbol", "date"]).reset_index(drop=True).copy()
     g = u.groupby("symbol", sort=False)
-    u["has_price_prev_day"] = g["has_price"].shift(1).fillna(False).astype(bool)
-    u["has_trade_prev_day"] = g["has_trade"].shift(1).fillna(False).astype(bool)
+    u["has_price_prev_day"] = g["has_price"].shift(1).astype("boolean").fillna(False).astype(bool)
+    u["has_trade_prev_day"] = g["has_trade"].shift(1).astype("boolean").fillna(False).astype(bool)
     u["listed_trading_days_before"] = g.cumcount().astype("int64")
     u["is_first_listed_day"] = u["listed_trading_days_before"] == 0
     u = u.rename(columns={"listing_status": "listing_status_expost"})
