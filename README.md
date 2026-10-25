@@ -72,6 +72,13 @@ bars = s5.read_partition("symbol=2330/year=2025")
 cov = s5.tables()["coverage_by_window"]
 ```
 
+## 資料品質稽核（唯讀，Phase A）
+
+`notebooks/TW_Market_Data_Lake_Audit.ipynb` 或
+`python -m tw_lake.audit.cli --data-root "$DATA_ROOT" --out-dir /content/tw_lake_audits`。
+只讀 manifest 指向的已發布版本，不呼叫 API、不寫 DATA_ROOT（`--publish-to-drive` 時才把結果複製到新的
+`_tw-market-data-lake/audits/<audit_id>/`）。規格、2026-10-25 實測發現與 Phase B 提案見 [docs/AUDIT.md](docs/AUDIT.md)。
+
 ## 開發
 
 ```bash
