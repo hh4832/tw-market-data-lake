@@ -392,3 +392,22 @@ def test_emerging_board_bars_before_listing_are_excluded(tmp_cfg, clock):
     saved = pd.read_parquet(ex.set_index("symbol").loc["9999", "saved_to"])        # B7: per-bar rows kept
     assert len(saved) == 9 and saved["bar_start"].dt.strftime("%H:%M").max() == "14:55"
     assert "quarantine" in ex.set_index("symbol").loc["9999", "saved_to"]
+
+
+
+def test_universe_v2_separates_pre_open_fields(tmp_cfg, clock):
+    fin = FakeFinlab()
+    assert run(tmp_cfg, clock, fin, FakeFubon(fin)) == 0
+    ctx = StoreContext(Layout.from_config(tmp_cfg), "x", tmp_cfg.local_tmp, clock)
+    s = DatasetStore("universe_daily_v2", ctx, ["date", "symbol"], "1")
+    u = s.read_all()
+    assert s.meta()["field_provenance"]["has_trade"].startswith("observed_at_date")
+    x = u[u["symbol"] == "5555"].sort_values("date").set_index("date")
+    # 5555 suspended 2023-10..12: first traded day after the suspension has has_trade_prev_day False
+    d = x.index[(x.index > pd.Timestamp("2023-12-31")) & x["has_trade"]][0]
+    assert not x.loc[d, "has_trade_prev_day"] and x.loc[d, "has_trade"]
+    n = u[u["symbol"] == "9999"].sort_values("date")
+    assert n.iloc[0]["is_first_listed_day"] and n.iloc[0]["listed_trading_days_before"] == 0
+    assert not n.iloc[0]["has_trade_prev_day"] and n.iloc[1]["has_trade_prev_day"]
+    v1 = DatasetStore("universe_daily", ctx, ["date", "symbol"], "1").read_all()
+    assert len(v1) == len(u) and "listing_status" in v1.columns      # v1 unchanged

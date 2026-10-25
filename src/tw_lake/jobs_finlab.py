@@ -17,7 +17,8 @@ from .normalize import merge_with_conflicts
 from .run_context import RunContext
 from .snapshots import publish_snapshot
 from .store import DatasetStore, StoreContext, upsert_partition_records
-from .universe import classify, minute_targets, symbol_master_pit, universe_daily
+from .universe import (UNIVERSE_V2_PROVENANCE, classify, minute_targets, symbol_master_pit, universe_daily,
+                       universe_daily_v2)
 
 RAW_VALUE_COLS = ["open", "high", "low", "close", "volume_shares", "turnover"]
 CHANGES_COLUMNS = ["detected_run_id", "partition", "key", "field", "published_value", "source_value"]
@@ -173,6 +174,16 @@ def run_finlab(rc: RunContext, sctx: StoreContext, src: FinlabSource) -> FinlabR
         summaries["universe_daily"] = publish_snapshot(
             uni_store, _year_parts(uni), asof, {"classification_asof": asof},
             extra_tables={"symbol_master": master})
+        if "universe_daily_v2" in cfg.raw["datasets"]:      # B5: additive derived dataset, v1 untouched
+            uni2_store = DatasetStore("universe_daily_v2", sctx, ["date", "symbol"], SCHEMA_VERSION,
+                                      params={"rules": "v2", "derived_from": "universe_daily v1",
+                                              "classification": "security_categories_current+code_rule"})
+            prepare_store(rc, uni2_store)
+            summaries["universe_daily_v2"] = publish_snapshot(
+                uni2_store, _year_parts(universe_daily_v2(uni)), asof,
+                {"classification_asof": asof, "field_provenance": UNIVERSE_V2_PROVENANCE,
+                 "pre_open_selection_columns": ["has_price_prev_day", "has_trade_prev_day",
+                                                "listed_trading_days_before"]})
         targets = minute_targets(master, cfg.minute_start)
         summaries["minute_targets"] = {
             "n": int(len(targets)), "by_type": targets["instrument_type"].value_counts().to_dict(),
