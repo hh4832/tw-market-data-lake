@@ -144,7 +144,7 @@
 | 項目 | 狀態 | commit |
 |---|---|---|
 | B1 發布協定：資料檔不 rename（獨占寫入 + fsync）、孤兒/0-byte 檔隔離後重寫、manifest 表 fsync、pointer 讀回比對、重新掛載後驗證 `tw_lake.audit.verify`（runner 自動執行）、故障注入 script/notebook | **已實作；Drive 實測待使用者執行故障注入 notebook** | `77d6e73` |
-| B2 回補 83 個空檔 symbol-year（166 窗）+ 7782 partial + security_categories | **待執行**：B1 故障注入 PASS 並合併後，跑一次 `update`（recovery 會自動偵測並重抓），再看 verify 與全量稽核 | — |
+| B2 回補 83 個空檔 symbol-year（166 窗）+ security_categories | **完成（2026-10-25）**：run `20261025_140026_c169ddf` 重抓後 82 檔仍 0-byte（F12，同路徑重寫）；修正 PR #3 後第二次 update：重新掛載後 verify `fubon_5m seq=67 checked=82 failures=0`、`security_categories seq=6 checked=1 failures=0`，RESULT OK | PR #3 |
 | B3 run QA：只對帳本次抓取區間；`vendor_definition_diff` → `pending_verification`；收盤/開盤不一致 → suspect | 已實作 | `17a4969` |
 | B4 `coverage_by_window.data_quality_status`（complete_with_gaps = source_gap_confirmed_by_repeat）＋ `research_ready=see_audit` | 已實作（不改變排程行為） | `a572d6b` |
 | B5 `universe_daily_v2`（前一交易日欄位、provenance；v1 不動） | 已實作；下次 run 首次發布 | `a86c31f` |
