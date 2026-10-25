@@ -157,3 +157,29 @@
 
 **B1 的限制**：「不 rename 就不會出現 0-byte」目前是依證據推測，須以故障注入 notebook 在真實 Drive 上驗證（T1 比較新舊協定；T2/T3 用真實 store 程式碼）。
 即使新協定 PASS，每次 run 之後仍以重新掛載後的 verify 為準。
+
+## 9. 全量稽核結果與 readiness v0.2（2026-10-25 晚）
+
+全量稽核 `audit_20261025_163404_e53478a`（5,885 s）：critical 0、integrity 179 項全 pass、來源未變動、partial 窗 0。
+5m 嚴格 readiness（`ready_5m_normal_session`）只有 21.83%：1,374,511 / 1,788,899 個 symbol-day 是 `intraday_missing`。
+高流動標的接近 100%（2330 99.9%、2317/0050/00878/2603/1101 100%、2454 98%），低流動標的偏低。原因是富邦不輸出無成交的 5 分鐘區間，而不是資料毀損。
+
+**F13（外幣計價 ETF 成交量單位）**：對帳 suspect 5,588 天中，00636K / 00668K / 00657K 各約 817 天、00687C 422 天，旗標 `volume_above_daily`。
+這些天開盤與收盤完全相同，5m 成交量剛好是 FinLab 日成交股數的 10 倍，推測是單位或交易單位定義不同。待官方資料查證，查證前這幾檔的 5m 成交量不得使用。
+不自動修正。
+
+**readiness v0.2（`tw_lake.audit.readiness`，探索性）**：新增 `ready_5m_no_trade_tolerant` / `ready_30m_no_trade_tolerant`，嚴格旗標保留不變；容忍版是嚴格版的超集合。
+`intraday_missing` 日只有在以下條件全部成立時，才把缺的區間視為「無成交」：
+
+| 條件 | 理由 |
+|---|---|
+| 對帳 `ok`（量比在 band 內；開、收相同；5m 高低 = 日高低） | 缺的 bar 若含當日極值，會變成 `daily_range_wider_than_5m` → 拒絕 |
+| 有 13:30 收盤集合競價 bar | 收盤價可由 5m 重建 |
+| 分區完整性 OK、正常盤（`intraday_missing` 已隱含 bars 有效且有模板） | |
+| `missing_count` ≤ 流動性分層上限：ge5000=0、500–5000=3、50–500=15、<50 不設上限 | 高流動標的缺區間不可信為無成交 |
+
+**限制**：量比 band（0.95–1.02）看不到成交量占當日 <5% 的單根缺 bar。所以 500–5000 張的分層容許 3 根是取捨，不是證明。
+`audit_5m_missing_by_liquidity` 是校準表，上限可用 `--missing-allowance` 調整。
+30m：某 30 分鐘桶的 5m 全缺時，視為無成交桶（沿用前收、量 0）；此規則屬研究 repo 的重採樣規格，本 repo 不產出 30m。
+
+重算不必重跑稽核：`python -m tw_lake.audit.rescore --audit-dir <audit 資料夾>`（只讀稽核輸出，寫入新的 `rescore_*` 資料夾；Audit notebook 第 8–9 格）。

@@ -86,7 +86,9 @@ def verdict(sev_rows: list[dict]) -> dict:
     base = "NOT research-ready" if crit else "conditionally usable"
     return {
         "daily_only": f"{base}: use audit_research_ready.ready_daily_only and the PIT caveats in audit_field_provenance",
-        "5m_normal_session": f"{base}: only symbol-days with ready_5m_normal_session=True; no silent gap filling",
+        "5m_normal_session": f"{base}: strict = ready_5m_normal_session; illiquid symbols: ready_5m_no_trade_tolerant "
+                             "(exploratory, missing intervals treated as no-trade only with volume/range evidence); "
+                             "no silent gap filling",
         "30m_resample": f"{base}: only from ready_30m_resample=True days; resampling spec is Phase B",
         "critical_items": len(crit),
         "statement": "This audit does not declare the data research-ready; it lists what must be fixed or filtered.",
