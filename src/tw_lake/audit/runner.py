@@ -88,7 +88,7 @@ def _iter(items, enabled, desc):
         return items
     try:
         from tqdm.auto import tqdm
-        return tqdm(items, desc=desc)
+        return tqdm(items, desc=desc, mininterval=30)   # one line per ~30 s when streamed
     except Exception:  # noqa: BLE001
         return items
 
