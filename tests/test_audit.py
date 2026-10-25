@@ -247,3 +247,37 @@ def test_verify_latest_run_detects_zero_byte_file(tmp_cfg, clock):
     rep2 = verify(layout, rid)
     assert not rep2["ok"] and any("zero_byte_file" in f["detail"] for f in rep2["failures"])
     assert not verify(layout, None, check_all=True, deep_all=True)["ok"]
+
+
+def test_vectorized_partition_audit_matches_reference(tmp_cfg, clock, tmp_path):
+    """The fast A2 implementation must produce exactly the reference (loop) output."""
+    hole = date(2024, 2, 20)
+    d5 = date(2023, 9, 5)
+    keep = {"09:00", "09:20", "13:30"}
+
+    def setup(f):
+        f.drop_bars.add(("2330", hole, "10:05"))
+        f.only_bars[("5555", d5)] = keep
+    build_lake(tmp_cfg, clock, setup)
+    from tw_lake.audit.reader import load_published
+    from tw_lake.audit.regime import trading_regime_daily
+    from tw_lake.paths import Layout
+    lay = Layout.from_config(tmp_cfg)
+    pv = load_published("fubon_5m", lay.dataset("fubon_5m"))
+    raw = pd.concat(pd.read_parquet(lay.dataset("finlab_daily_raw") / r) for r in
+                    load_published("finlab_daily_raw", lay.dataset("finlab_daily_raw")).partitions["relpath"])
+    raw["symbol"] = raw["symbol"].astype(str)
+    disp = load_published("disposal_attention", lay.dataset("disposal_attention"))
+    di = pd.read_parquet(lay.dataset("disposal_attention") /
+                         disp.partitions.set_index("partition").loc["dataset=disposal_information", "relpath"])
+    tds = sorted(pd.to_datetime(raw.loc[raw["volume_shares"] > 0, "date"]).unique())
+    regime = trading_regime_daily(di, tds)
+    frames = {r.partition: pd.read_parquet(pv.data_path(r.relpath)) for r in pv.partitions.itertuples()}
+    tm = A2.build_templates([v for k, v in frames.items() if k.split("/")[0] in ("symbol=2330", "symbol=0050")])
+    for part, df in frames.items():
+        sym, yr = part.split("/")[0].split("=")[1], int(part.split("=")[-1])
+        fd = raw[(raw["symbol"] == sym) & (pd.to_datetime(raw["date"]).dt.year == yr)]
+        rg = regime[regime["symbol"] == sym]
+        a = A2.audit_symbol_partition(df, sym, fd, tm, rg, set(tds), part, 1).reset_index(drop=True)
+        b = A2._audit_symbol_partition_reference(df, sym, fd, tm, rg, set(tds), part, 1).reset_index(drop=True)
+        pd.testing.assert_frame_equal(a, b, check_dtype=False, check_exact=False)
