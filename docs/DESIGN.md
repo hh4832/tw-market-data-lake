@@ -1,4 +1,4 @@
-# tw-market-data-lake 設計（v1.1，2026-10-23）
+# tw-market-data-lake 設計（v1.2，2026-10-25）
 
 v1 任務範圍與授權邊界不變：**只抓資料**，不做 30m 聚合、訊號、回測或下單；只寫入本 repo 擁有的 Drive 資料夾；
 不修改其他 repository。v1.1 套用 10 項設計修正（下文標示 ①–⑩）。
@@ -28,8 +28,14 @@ v1 任務範圍與授權邊界不變：**只抓資料**，不做 30m 聚合、�
 ```
 
 寫入順序：本機寫檔 → 讀回逐值驗證 → content hash（以 parquet round trip 後資料定義）→ SHA256 →
-複製到 Drive staging → 驗證 SHA256 → rename 發布 → 驗證 SHA256 → **最後**寫 manifest 版本並原子替換
-`published.json`。更新一個年分區就是產生新的檔案與新的 manifest 版本；舊檔永遠保留在磁碟與舊 manifest 中。
+**直接以獨占建立（`xb`）+ fsync 寫到 content-addressed 最終路徑（不經 staging、不 rename）** → 驗證 SHA256 →
+**最後**寫 manifest 版本並原子替換 `published.json`（fsync 後替換並讀回比對）。
+
+> v1.2（2026-10-25，B1）：稽核發現 copy2→staging→rename 的資料檔在 Drive 上有 83 個成為 0-byte（寫入端讀回時命中
+> FUSE 本機快取所以驗證通過；run 結束時的 flush/remount 也沒有救回）。新協定不在 Drive 上 rename 資料檔；
+> 未被任何 manifest 引用、內容或大小不對的同名檔（中斷或遺失的寫入）會移到 `quarantine/<run>/<dataset>/orphan_partial/`
+> 後重寫；已被引用者照舊拒絕覆蓋（除非 recovery 判定為毀損）。持久性只能在**重新掛載後**驗證：
+> `python -m tw_lake.audit.verify`（runner notebook 已自動執行）。故障注入見 `scripts/drive_fault_injection.py`。更新一個年分區就是產生新的檔案與新的 manifest 版本；舊檔永遠保留在磁碟與舊 manifest 中。
 
 Single-writer lock（`locks/writer.lock`，O_EXCL + heartbeat）；每次 manifest commit 前驗證 lock 仍屬本 run。
 過期 lock 只能用 `--break-stale-lock` 打破，舊 lock 移到 quarantine。
@@ -85,10 +91,10 @@ turnover, turnover_present, timeframe, bar_label_assumption, adjusted=False, sou
 
 ## 6. QA 對帳 ⑧
 
-`qa_reconciliation_5m`（每個本次寫入的 symbol-day）：
+`qa_reconciliation_5m`（只涵蓋**本次實際抓取的日期區間**，v1.2 修正）：
 `ok`、`no_trade_expected`、`missing_in_source`（FinLab 有成交、無 bar）、
-`data_error`（分 K 高低點超出日 K 範圍）、`vendor_definition_diff`（日 K 範圍較寬，或分 K 量低於日量——
-例如盤後定價、鉅額交易計入日量）、`suspect`（分 K 量高於日量、或 FinLab 無成交卻有 bar）。
+`data_error`（分 K 高低點超出日 K 範圍）、`suspect`（收盤/開盤不一致、分 K 量高於日量、FinLab 無成交卻有 bar）、
+`pending_verification`（分 K 量低於門檻或日 K 範圍較寬——**不再**自動歸為 vendor_definition_diff，因 FinLab 日量口徑未經官方驗證）。
 單純量的差異不會被判為缺漏；只有 `data_error` 讓 QA status 為 fail。
 
 ## 7. 模式
@@ -116,7 +122,7 @@ CI 在 pandas 2.2 與 3.x 兩種環境執行。
 - 360 天 5m（約 1.3 萬筆）單次回傳完整 → 無筆數上限疑慮，`window_months` 改為 6。
 - 時間戳為 bar 起點；每日 54 根：09:00–13:20 連續撮合 53 根 ＋ **13:30 一根＝收盤集合競價**（13:25 無 bar）。下游 30m 聚合須把 13:30 視為競價。
 - 分 K **沒有 turnover** → 欄位存 null、`turnover_present=False`。
-- 5m 量 ×1000 ÷ FinLab 成交股數：2330 中位數 0.87、0050 0.94、6488 0.96 → FinLab 日量含盤後定價／鉅額／零股等口徑，歸類為 `vendor_definition_diff`，非缺漏。
+- 5m 量 ×1000 ÷ FinLab 成交股數：2330 中位數 0.87、0050 0.94、6488 0.96 → 推測 FinLab 日量含盤後定價／鉅額／零股等口徑（未經官方驗證；v1.2 起標 `pending_verification`），非缺漏。
 - 6488 有 20 天每日僅 15 根 → 處置期間分盤撮合，資料照抓，下游以處置表判讀。
 - FinLab ETF 在 `security_categories` 的 market 為 `etf`（category `domestic_etf`／`foreign_etf`）；v1.1.1 修正分類，ETF 納入 5m 目標。
 - 處置／注意：`disposal_information`（事件表 8,125 列）、`etl:disposal_stock_filter`、`etl:noticed_stock_filter`（每日布林矩陣）可用；`notice_information` 不存在。
