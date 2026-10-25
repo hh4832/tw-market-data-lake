@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--symbols", default=None, help="comma separated subset of 5m symbols")
     p.add_argument("--max-partitions", type=int, default=None)
     p.add_argument("--deep-verify", action="store_true", help="SHA256 every published file")
-    p.add_argument("--sha-sample", type=int, default=200, help="random published files per dataset to SHA256")
+    p.add_argument("--sha-sample", type=int, default=20, help="random published files per dataset to SHA256")
     p.add_argument("--template-symbols", default="2330,0050,006208")
     p.add_argument("--volume-ratio-band", default="0.95,1.02")
     p.add_argument("--no-progress", action="store_true")

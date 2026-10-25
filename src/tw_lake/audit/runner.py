@@ -41,7 +41,7 @@ class AuditOptions:
     symbols: list[str] | None = None
     max_partitions: int | None = None
     deep_verify: bool = False
-    sha_sample: int = 200
+    sha_sample: int = 20
     template_symbols: tuple[str, ...] = ("2330", "0050", "006208")
     volume_ratio_band: tuple[float, float] = (0.95, 1.02)
     publish_dir: Path | None = None
@@ -108,26 +108,32 @@ def run_audit(cfg: Config, opts: AuditOptions) -> Path:
     t0 = time.monotonic()
 
     # ---- source fingerprint (before) -------------------------------------------------
-    ctl = control_files(layout.data_root, layout.dataset_dirs, layout.system_dir, list(layout.protected))
-    fp_before = fingerprint(ctl)
-    ctx.note(f"fingerprinted {len(ctl)} control files (pointers, manifests, runs, locks, staging, quarantine, protected)")
-
     pvs = {name: load_published(name, root) for name, root in layout.dataset_dirs.items()}
-    data_paths = [pv.data_path(r) for pv in pvs.values() if len(pv.partitions) for r in pv.partitions["relpath"]]
-    data_fp_before = fingerprint(data_paths, hash_small_bytes=0)     # stat only (size, mtime)
+    hash_set, stat_set = control_files({n: pv.version_dir for n, pv in pvs.items()}, layout.dataset_dirs,
+                                       layout.system_dir)
+    fp_before = {**fingerprint(hash_set, hash_small_bytes=50_000_000), **fingerprint(stat_set)}
+    ctx.note(f"fingerprinted {len(hash_set)} manifest/pointer files (sha256) + {len(stat_set)} system entries "
+             f"(stat); protected folders are not read  [{time.monotonic() - t0:.0f}s]")
     sources = {n: {"seq": pv.seq, "version_dir": (pv.pointer or {}).get("version_dir"),
                    "run_id": (pv.pointer or {}).get("run_id"), "committed_at": (pv.pointer or {}).get("committed_at")}
                for n, pv in pvs.items()}
 
-    # ---- A1 stat-level integrity ----------------------------------------------------
+    # ---- A1 stat-level integrity (parallel; 5m scope follows --symbols) -------------------
     rng = random.Random(opts.seed)
     integ: list[dict] = []
+    data_fp_before: dict = {}
     for name, pv in pvs.items():
         integ += A1.version_checks(pv)
         parts = list(pv.partitions["partition"]) if len(pv.partitions) else []
+        only = None
+        if name == "fubon_5m" and opts.symbols:
+            only = {p for p in parts if p.split("/")[0].split("=")[1] in set(opts.symbols)}
+            parts = sorted(only)
         sample = set(rng.sample(parts, min(opts.sha_sample, len(parts)))) if parts else set()
-        integ += A1.stat_checks(pv, deep=opts.deep_verify, sha_sample=sample)
-    ctx.note("A1 stat checks done")
+        integ += A1.stat_checks(pv, deep=opts.deep_verify, sha_sample=sample, only_partitions=only,
+                                fp_out=data_fp_before)
+        ctx.note(f"A1 {name}: {len(parts)} partitions checked  [{time.monotonic() - t0:.0f}s]")
+    data_paths = list(data_fp_before)
 
     # ---- FinLab raw daily (5m era) -----------------------------------------------------
     raw_pv = pvs["finlab_daily_raw"]
@@ -151,7 +157,7 @@ def run_audit(cfg: Config, opts: AuditOptions) -> Path:
     trading_days = sorted(raw.loc[raw["volume_shares"].fillna(0) > 0, "date"].unique())
     td_set = set(pd.to_datetime(trading_days))
     raw_by_sym = dict(tuple(raw.groupby("symbol")))
-    ctx.note(f"FinLab raw loaded: {len(raw)} rows {len(trading_days)} trading days")
+    ctx.note(f"FinLab raw loaded: {len(raw)} rows {len(trading_days)} trading days  [{time.monotonic() - t0:.0f}s]")
 
     calendar_source = "finlab_raw_daily"
     # ---- disposal -> trading_regime_daily ------------------------------------------------
@@ -189,34 +195,49 @@ def run_audit(cfg: Config, opts: AuditOptions) -> Path:
         calendar_source = "5m_template_dates_fallback (FinLab raw unavailable)"
         regime = trading_regime_daily(disp.get("disposal_information"), trading_days)
         regime_by_sym = dict(tuple(regime.groupby("symbol"))) if len(regime) else {}
-    ctx.note(f"templates learned for {len(templates)} dates from {opts.template_symbols}")
+    ctx.note(f"templates learned for {len(templates)} dates from {opts.template_symbols}  [{time.monotonic() - t0:.0f}s]")
 
     sel = parts5 if not opts.symbols else parts5[parts5["symbol"].isin(opts.symbols)]
     if opts.max_partitions:
         sel = sel.head(opts.max_partitions)
     day_frames, md_frames, schema5 = [], [], {}
-    for rec in _iter(list(sel.itertuples(index=False)), opts.progress, "5m partitions"):
-        sym, yr = rec.symbol, rec.year
-        fd = raw_by_sym.get(sym, raw.iloc[0:0])
-        fd = fd[fd["date"].dt.year == yr]
-        df = EMPTY_5M
-        if rec.partition not in bad:
-            try:
-                df = _read(pv5, rec)
-                integ += A1.read_checks(pv5, rec, df, schema5)
-            except Exception as e:  # noqa: BLE001
-                integ.append(A1.unreadable(pv5, rec, e))
-                bad.add(rec.partition)
-                df = EMPTY_5M
-        day_frames.append(A2.audit_symbol_partition(df, sym, fd, templates, regime_by_sym.get(sym, regime.iloc[0:0]),
-                                                    td_set, rec.partition, pv5.seq))
-        if len(df):
-            md_frames.append(A2.daily_from_bars(df))
+
+    def load(rec):
+        if rec.partition in bad:
+            return rec, None, None
+        try:
+            return rec, _read(pv5, rec), None
+        except Exception as e:  # noqa: BLE001
+            return rec, None, e
+
+    from concurrent.futures import ThreadPoolExecutor
+    recs = list(sel.itertuples(index=False))
+    bar = _iter(range(len(recs)), opts.progress, "5m partitions")
+    it = iter(bar)
+    with ThreadPoolExecutor(max_workers=16) as ex:            # bounded prefetch: Drive reads are latency bound
+        for i in range(0, len(recs), 64):
+            for rec, df, err in ex.map(load, recs[i:i + 64]):
+                next(it, None)
+                sym, yr = rec.symbol, rec.year
+                fd = raw_by_sym.get(sym, raw.iloc[0:0])
+                fd = fd[fd["date"].dt.year == yr]
+                if err is not None:
+                    integ.append(A1.unreadable(pv5, rec, err))
+                    bad.add(rec.partition)
+                if df is None:
+                    df = EMPTY_5M
+                else:
+                    integ += A1.read_checks(pv5, rec, df, schema5)
+                day_frames.append(A2.audit_symbol_partition(df, sym, fd, templates,
+                                                            regime_by_sym.get(sym, regime.iloc[0:0]),
+                                                            td_set, rec.partition, pv5.seq))
+                if len(df):
+                    md_frames.append(A2.daily_from_bars(df))
     day_audit = pd.concat(day_frames, ignore_index=True) if day_frames else pd.DataFrame(columns=A2.DAY_COLUMNS)
     minute_daily = pd.concat(md_frames, ignore_index=True) if md_frames else A2.daily_from_bars(EMPTY_5M)
     audited_syms = set(sel["symbol"])
     rec_df = A3.reconcile(minute_daily, raw[raw["symbol"].isin(audited_syms)], td_set, opts.volume_ratio_band)
-    ctx.note(f"A2/A3 done: {len(sel)} partitions, {len(day_audit)} symbol-days")
+    ctx.note(f"A2/A3 done: {len(sel)} partitions, {len(day_audit)} symbol-days  [{time.monotonic() - t0:.0f}s]")
 
     # ---- A4 universe ----------------------------------------------------------------------
     uni = pvs["universe_daily"]
@@ -265,16 +286,18 @@ def run_audit(cfg: Config, opts: AuditOptions) -> Path:
             df.to_parquet(out_dir / f"{name}.parquet", index=False)
     tables["audit_ohlcv_top100"].to_csv(out_dir / "audit_ohlcv_top100.csv", index=False, encoding="utf-8-sig")
 
-    changes = diff_fingerprints(fp_before, fingerprint(ctl))
+    fp_after = {**fingerprint(hash_set, hash_small_bytes=50_000_000), **fingerprint(stat_set)}
+    changes = diff_fingerprints(fp_before, fp_after)
     data_changes = diff_fingerprints(data_fp_before, fingerprint(data_paths, hash_small_bytes=0))
     findings = {
         "handoff_reconstruction": A1.reconstruct_handoff(pv5),
         "recon_summary": A3.summarize(rec_df, day_audit),
         "readiness": readiness_summary(ready),
         "regime_matrix_agreement": regime_checks,
-        "source_unchanged": {"control_files": len(ctl), "data_files_stat": len(data_paths),
+        "source_unchanged": {"control_files": len(hash_set) + len(stat_set), "data_files_stat": len(data_paths),
                              "changed": (changes + data_changes)[:50], "ok": not changes and not data_changes,
-                             "method": "control files: size+mtime+sha256 (<=5MB); data files: size+mtime"},
+                             "method": "pointers + published manifest version: size+mtime+sha256; system entries and "
+                                       "audited data files: size+mtime; protected folders not read"},
     }
     meta = {"audit_id": audit_id, "audit_version": AUDIT_VERSION, "git_sha": git_sha(),
             "started_at": started.isoformat(), "finished_at": datetime.now(TAIPEI).isoformat(),

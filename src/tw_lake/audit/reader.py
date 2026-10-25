@@ -95,39 +95,45 @@ def load_published(dataset: str, root: Path) -> PublishedVersion:
 
 
 # ------------------------------------------------------------------ source fingerprint
-def fingerprint(paths: list[Path], hash_small_bytes: int = 5_000_000) -> dict[str, dict]:
-    """Stat (and hash, when small) every given path. Used before/after the audit to prove
-    that the audit did not change any source file."""
-    out = {}
-    for p in paths:
-        try:
-            st = os.stat(p)
-        except FileNotFoundError:
-            out[str(p)] = {"exists": False}
-            continue
-        rec = {"exists": True, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
-        if p.is_file() and st.st_size <= hash_small_bytes:
-            rec["sha256"] = sha256_file(p)
-        out[str(p)] = rec
-    return out
+def _stat_one(p: Path, hash_small_bytes: int) -> tuple[str, dict]:
+    try:
+        st = os.stat(p)
+    except FileNotFoundError:
+        return str(p), {"exists": False}
+    rec = {"exists": True, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+    if hash_small_bytes and st.st_size <= hash_small_bytes and p.is_file():
+        rec["sha256"] = sha256_file(p)
+    return str(p), rec
 
 
-def control_files(data_root: Path, dataset_dirs: dict[str, Path], system_dir: Path,
-                  protected: list[Path]) -> list[Path]:
-    """Pointers, manifest tables, lock/staging/quarantine/run listings, protected folders."""
-    files: list[Path] = []
-    for root in dataset_dirs.values():
-        man = root / "_manifest"
-        if man.exists():
-            files += [p for p in man.rglob("*") if p.is_file()]
+def fingerprint(paths: list[Path], hash_small_bytes: int = 0, workers: int = 32) -> dict[str, dict]:
+    """Stat (and optionally hash small files) in parallel threads - Drive FUSE is latency bound.
+    Used before/after the audit to prove that the audit did not change any source file."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not paths:
+        return {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return dict(ex.map(lambda p: _stat_one(Path(p), hash_small_bytes), paths))
+
+
+def control_files(dataset_versions: dict[str, Path | None], dataset_dirs: dict[str, Path],
+                  system_dir: Path) -> tuple[list[Path], list[Path]]:
+    """(hash_set, stat_set).
+    hash_set: every published.json + the files of the currently published manifest version.
+    stat_set: top-level entries of locks/ staging/ quarantine/ runs/ (name, size, mtime).
+    Protected folders (finlab_0050, fubon_txf, IKBR, ...) are never listed or opened (AGENTS.md rule 2)."""
+    hash_set: list[Path] = []
+    for name, root in dataset_dirs.items():
+        hash_set.append(root / "_manifest" / "published.json")
+        vdir = dataset_versions.get(name)
+        if vdir is not None and vdir.exists():
+            hash_set += sorted(p for p in vdir.iterdir() if p.is_file())
+    stat_set: list[Path] = []
     for sub in ("locks", "staging", "quarantine", "runs"):
         d = system_dir / sub
         if d.exists():
-            files += [p for p in d.rglob("*") if p.is_file()]
-    for prot in protected:
-        if prot.exists():
-            files += [p for p in prot.rglob("*") if p.is_file()]
-    return sorted(set(files))
+            stat_set += sorted(d.iterdir())
+    return hash_set, stat_set
 
 
 def diff_fingerprints(before: dict, after: dict) -> list[dict]:

@@ -9,6 +9,7 @@ reconstruct_handoff()  can the handoff statistics be rebuilt from the manifest a
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -70,7 +71,37 @@ def version_checks(pv: PublishedVersion) -> list[dict]:
     return rows
 
 
-def stat_checks(pv: PublishedVersion, deep: bool = False, sha_sample: set[str] | None = None) -> list[dict]:
+def _check_one(pv: PublishedVersion, r, do_sha: bool, deep: bool) -> tuple[list[dict], tuple]:
+    rows = []
+    part, rel = r.partition, r.relpath
+    if not (rel.startswith(f"data/{part}/") and Path(rel).name == f"{str(r.content_hash)[:32]}.parquet"):
+        rows.append(_row(pv, part, rel, "path_matches_partition_and_hash", "fail", "warning", rel))
+    fp = pv.data_path(rel)
+    try:
+        st = os.stat(fp)
+    except FileNotFoundError:
+        rows.append(_row(pv, part, rel, "file_exists", "fail", "critical", "referenced file missing"))
+        return rows, (str(fp), {"exists": False})
+    fpr = (str(fp), {"exists": True, "size": st.st_size, "mtime_ns": st.st_mtime_ns})
+    if st.st_size == 0:
+        rows.append(_row(pv, part, rel, "file_size", "fail", "critical", f"zero_byte_file manifest_bytes={int(r.file_bytes)}"))
+    elif st.st_size != int(r.file_bytes):
+        rows.append(_row(pv, part, rel, "file_size", "fail", "critical", f"size={st.st_size} manifest_bytes={int(r.file_bytes)}"))
+    elif do_sha:
+        sha = sha256_file(fp)
+        ok = sha == r.file_sha256
+        rows.append(_row(pv, part, rel, "file_sha256", "pass" if ok else "fail", "info" if ok else "critical",
+                         ("deep" if deep else "sample") if ok else f"got {sha}"))
+    return rows, fpr
+
+
+def stat_checks(pv: PublishedVersion, deep: bool = False, sha_sample: set[str] | None = None,
+                only_partitions: set[str] | None = None, workers: int = 32,
+                fp_out: dict | None = None) -> list[dict]:
+    """Per published partition: exists, size vs manifest (0-byte), naming, optional SHA256.
+    Runs in parallel threads; fp_out (if given) receives {path: {size, mtime_ns}} for the
+    source-unchanged comparison. only_partitions limits the scope (e.g. --symbols)."""
+    from concurrent.futures import ThreadPoolExecutor
     rows: list[dict] = []
     parts = pv.partitions
     if parts.empty:
@@ -79,30 +110,14 @@ def stat_checks(pv: PublishedVersion, deep: bool = False, sha_sample: set[str] |
     dup = parts["partition"][parts["partition"].duplicated()].tolist()
     rows.append(_row(pv, None, None, "unique_partitions", "pass" if not dup else "fail",
                      "critical" if dup else "info", ",".join(dup[:20])))
-    for r in parts.itertuples(index=False):
-        part, rel = r.partition, r.relpath
-        name_ok = rel.startswith(f"data/{part}/") and Path(rel).name == f"{str(r.content_hash)[:32]}.parquet"
-        if not name_ok:
-            rows.append(_row(pv, part, rel, "path_matches_partition_and_hash", "fail", "warning", rel))
-        fp = pv.data_path(rel)
-        if not fp.exists():
-            rows.append(_row(pv, part, rel, "file_exists", "fail", "critical", "referenced file missing"))
-            continue
-        size = fp.stat().st_size
-        if size == 0:
-            rows.append(_row(pv, part, rel, "file_size", "fail", "critical",
-                             f"zero_byte_file manifest_bytes={int(r.file_bytes)}"))
-            continue
-        if size != int(r.file_bytes):
-            rows.append(_row(pv, part, rel, "file_size", "fail", "critical",
-                             f"size={size} manifest_bytes={int(r.file_bytes)}"))
-            continue
-        if deep or (sha_sample and part in sha_sample):
-            sha = sha256_file(fp)
-            if sha != r.file_sha256:
-                rows.append(_row(pv, part, rel, "file_sha256", "fail", "critical", f"got {sha}"))
-            else:
-                rows.append(_row(pv, part, rel, "file_sha256", "pass", "info", "deep" if deep else "sample"))
+    recs = [r for r in parts.itertuples(index=False) if only_partitions is None or r.partition in only_partitions]
+    sample = sha_sample or set()
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(lambda r: _check_one(pv, r, deep or r.partition in sample, deep), recs))
+    for rr, fpr in results:
+        rows += rr
+        if fp_out is not None:
+            fp_out[fpr[0]] = fpr[1]
     return rows
 
 

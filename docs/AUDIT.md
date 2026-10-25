@@ -10,7 +10,7 @@
 | 不寫 DATA_ROOT | `tw_lake.audit` 沒有任何寫入原始資料的呼叫；所有輸出都寫到 `--out-dir`（預設在 Colab 本機 `/content/tw_lake_audits/<audit_id>/`）。`_guard_out_dir` 會拒絕把輸出寫進 dataset、受保護資料夾、`locks/ runs/ staging/ quarantine/ smoke/`，也拒絕寫進已存在且非空的資料夾。 |
 | 選用的 Drive 副本 | 只在 `--publish-to-drive` 時，才在稽核完成後把結果**複製**到新資料夾 `_tw-market-data-lake/audits/<audit_id>/`。這個路徑不屬於 ingestion 會讀寫的範圍，也不會覆蓋任何東西。 |
 | 不呼叫 API | 不 import `fubon_source` / `finlab_source`，不需要任何憑證。 |
-| 有證據 | 稽核開始與結束各做一次 fingerprint：控制檔（pointer、manifest、runs、locks、staging、quarantine、受保護資料夾）記錄 size、mtime 與 SHA256（≤5 MB 的檔案）；manifest 引用的資料檔記錄 size 與 mtime。比對結果寫在 `audit_summary.json → findings.source_unchanged`。 |
+| 有證據 | 稽核開始與結束各做一次 fingerprint：pointer 與目前發布的 manifest 版本記錄 size、mtime 與 SHA256；locks/staging/quarantine/runs 第一層記錄 size 與 mtime；**受保護資料夾完全不讀**（AGENTS.md 規則 2）；manifest 引用的資料檔記錄 size 與 mtime。比對結果寫在 `audit_summary.json → findings.source_unchanged`。 |
 | 測試 | `tests/test_audit.py::test_audit_is_read_only...` 對整個 DATA_ROOT 樹做前後 SHA256 比對，必須完全相同。2026-10-25 的鏡像實測是用另一個非 root 使用者、對唯讀檔案系統執行，執行成功。 |
 
 所有讀取都從 `_manifest/published.json` → `versions/<seq>_<run_id>/partitions.parquet` 開始，不會 glob `data/` 去判斷哪些檔案有效。
