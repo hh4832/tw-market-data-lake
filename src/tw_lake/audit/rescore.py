@@ -31,7 +31,7 @@ def _read(path: Path, columns: list[str]) -> pd.DataFrame:
 
 
 def rescore(audit_dir: Path, out_dir: Path | None = None, allowance: dict | None = None,
-            require_close_auction: bool = True) -> Path:
+            require_close_auction: bool = False) -> Path:
     audit_dir = Path(audit_dir)
     day = _read(audit_dir / "audit_5m_by_symbol_day.parquet", DAY_INPUT_COLUMNS)
     rec_p = audit_dir / "audit_ohlcv_reconciliation.parquet"
@@ -68,12 +68,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--audit-dir", required=True)
     p.add_argument("--out-dir", default=None)
     p.add_argument("--missing-allowance", default=None,
-                   help="e.g. ge5000_lots=0,500_5000_lots=3,50_500_lots=15,lt50_lots=none")
-    p.add_argument("--no-require-close-auction", action="store_true",
-                   help="accept tolerant days without a 13:30 auction bar when recon is ok (close already equal)")
+                   help="default ge5000_lots=0,500_5000_lots=10,50_500_lots=none,lt50_lots=none")
+    p.add_argument("--require-close-auction", action="store_true",
+                   help="v0.2.0 behaviour: tolerant days must have a 13:30 closing-auction bar")
+    p.add_argument("--no-require-close-auction", action="store_true", help=argparse.SUPPRESS)  # v0.2.1 default
     a = p.parse_args(argv)
     out = rescore(Path(a.audit_dir), Path(a.out_dir) if a.out_dir else None, parse_allowance(a.missing_allowance),
-                  not a.no_require_close_auction)
+                  a.require_close_auction)
     s = json.loads((out / "rescore_summary.json").read_text(encoding="utf-8"))["readiness"]
     print(f"rescore written to {out}")
     for k in ("ready_5m_normal_session", "ready_5m_no_trade_tolerant"):

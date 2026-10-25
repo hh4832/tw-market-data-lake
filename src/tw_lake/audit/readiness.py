@@ -26,6 +26,10 @@ when the evidence says the missing intervals carried no trades:
 5m bars are all absent is then a no-trade bucket (carry the previous close, volume 0), so
 ``ready_30m_no_trade_tolerant`` equals the 5m tolerant flag.
 The allowances are exploratory defaults; audit_5m_missing_by_liquidity is the calibration table.
+v0.2.1 defaults (calibrated on audit_20261025_163404_e53478a): ge5000=0, 500-5000=10, 50-500 and <50
+uncapped, 13:30 auction bar not required (recon ok already requires last 5m close == daily close).
+Evidence: in the 500-5000 and 50-500 buckets the share of recon-ok days stays at 90-97% from 0 to
+31+ missing bars, i.e. more missing bars do not mean more lost volume.
 A symbol/date that is not ready is not necessarily wrong, and a ready one is not certified.
 """
 from __future__ import annotations
@@ -33,13 +37,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-READINESS_VERSION = "0.2.0"
+READINESS_VERSION = "0.2.1"
 
 # liquidity bucket (bars.LIQUIDITY_BUCKETS, by FinLab daily lots) -> max missing template timestamps
 DEFAULT_MISSING_ALLOWANCE: dict[str, int | None] = {
     "ge5000_lots": 0,
-    "500_5000_lots": 3,
-    "50_500_lots": 15,
+    "500_5000_lots": 10,
+    "50_500_lots": None,
     "lt50_lots": None,
 }
 BUCKET_ORDER = ["ge5000_lots", "500_5000_lots", "50_500_lots", "lt50_lots", "no_finlab_trade"]
@@ -76,7 +80,7 @@ def _bucket_from_lots(lots: pd.Series) -> pd.Series:
 
 def research_ready(day_audit: pd.DataFrame, recon: pd.DataFrame, bad_partitions: set[str],
                    allowance: dict[str, int | None] | None = None,
-                   require_close_auction: bool = True) -> pd.DataFrame:
+                   require_close_auction: bool = False) -> pd.DataFrame:
     """require_close_auction=False: an illiquid day without a 13:30 auction trade is accepted when the
     reconciliation is ok (which already requires the last 5m close == FinLab close)."""
     if len(day_audit) == 0:
@@ -165,7 +169,7 @@ def _pct(k, n):
 
 
 def readiness_summary(ready: pd.DataFrame, allowance: dict[str, int | None] | None = None,
-                      require_close_auction: bool = True) -> dict:
+                      require_close_auction: bool = False) -> dict:
     if len(ready) == 0:
         return {"rows": 0}
     n = len(ready)

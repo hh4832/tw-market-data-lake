@@ -307,7 +307,8 @@ def test_tolerant_readiness_rules():
     rec = pd.DataFrame({"symbol": list("ABCDEFGHIJ"), "date": pd.Timestamp("2024-02-20"),
                         "classification": ["ok", "ok", "pending_verification", "ok", "ok", "ok", "pending_verification",
                                            "ok", "ok", "suspect"]})
-    r = research_ready(days, rec, {"bad"}).set_index("symbol")
+    v020 = {"ge5000_lots": 0, "500_5000_lots": 3, "50_500_lots": 15, "lt50_lots": None}
+    r = research_ready(days, rec, {"bad"}, v020, require_close_auction=True).set_index("symbol")
     tol = r["ready_5m_no_trade_tolerant"]
     assert tol.to_dict() == {"A": False, "B": True, "C": False, "D": False, "E": False, "F": True, "G": True,
                              "H": False, "I": False, "J": False}
@@ -318,7 +319,7 @@ def test_tolerant_readiness_rules():
     assert reasons["D"] == "no_close_auction_bar" and reasons["H"] == "partition_integrity_failure"
     assert reasons["I"] == "5m_regime_call_auction_unverified" and reasons["J"] == "recon_suspect"
     assert r.loc["G", "ready_5m_normal_session"] and not r.loc["B", "ready_5m_normal_session"]
-    s = readiness_summary(r.reset_index())
+    s = readiness_summary(r.reset_index(), v020, True)
     assert s["ready_5m_no_trade_tolerant"]["count"] == 3 and s["by_liquidity_bucket"]["lt50_lots"]["tolerant_pct"] == 20.0
     h = missing_by_liquidity(r.reset_index())
     assert h["days"].sum() == 9 and set(h["liquidity_bucket"]) == {"ge5000_lots", "50_500_lots", "lt50_lots"}
@@ -341,7 +342,7 @@ def test_rescore_matches_runner_and_leaves_audit_untouched(tmp_cfg, clock, tmp_p
     before = tree_snapshot(out)
     key = ("2330", pd.Timestamp(hole))
     runner_ready = table(out, "audit_research_ready").set_index(["symbol", "date"]).sort_index()
-    # fake 2330 trades ~1,000 lots (500_5000 bucket, allowance 3) and the dropped bar holds <2% of the
+    # fake 2330 trades ~1,000 lots (500_5000 bucket, allowance 10) and the dropped bar holds <2% of the
     # volume, so the volume band cannot see it: tolerant accepts it - the documented limitation.
     assert runner_ready.loc[key, "ready_5m_no_trade_tolerant"] and not runner_ready.loc[key, "ready_5m_normal_session"]
     assert "ready_5m_no_trade_tolerant" in s["findings"]["readiness"]
@@ -365,6 +366,17 @@ def test_tolerant_without_close_auction_requirement():
                          _day("C", 10, "intraday_missing", 30, close_bar=False)])
     rec = pd.DataFrame({"symbol": ["D", "C"], "date": pd.Timestamp("2024-02-20"),
                         "classification": ["ok", "pending_verification"]})
-    on = research_ready(days, rec, set()).set_index("symbol")["ready_5m_no_trade_tolerant"]
-    off = research_ready(days, rec, set(), require_close_auction=False).set_index("symbol")["ready_5m_no_trade_tolerant"]
+    on = research_ready(days, rec, set(), require_close_auction=True).set_index("symbol")["ready_5m_no_trade_tolerant"]
+    off = research_ready(days, rec, set()).set_index("symbol")["ready_5m_no_trade_tolerant"]
     assert not on["D"] and off["D"] and not off["C"]
+
+
+def test_v021_defaults():
+    from tw_lake.audit.readiness import DEFAULT_MISSING_ALLOWANCE, READINESS_VERSION, research_ready
+    assert READINESS_VERSION == "0.2.1"
+    assert DEFAULT_MISSING_ALLOWANCE == {"ge5000_lots": 0, "500_5000_lots": 10, "50_500_lots": None, "lt50_lots": None}
+    days = pd.DataFrame([_day("A", 20000, "intraday_missing", 1), _day("B", 1000, "intraday_missing", 10),
+                         _day("C", 1000, "intraday_missing", 11), _day("D", 200, "intraday_missing", 45, close_bar=False)])
+    rec = pd.DataFrame({"symbol": list("ABCD"), "date": pd.Timestamp("2024-02-20"), "classification": "ok"})
+    tol = research_ready(days, rec, set()).set_index("symbol")["ready_5m_no_trade_tolerant"]
+    assert tol.to_dict() == {"A": False, "B": True, "C": False, "D": True}

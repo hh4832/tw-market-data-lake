@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--template-symbols", default="2330,0050,006208")
     p.add_argument("--volume-ratio-band", default="0.95,1.02")
     p.add_argument("--missing-allowance", default=None,
-                   help="readiness v0.2, e.g. ge5000_lots=0,500_5000_lots=3,50_500_lots=15,lt50_lots=none")
+                   help="readiness v0.2, e.g. ge5000_lots=0,500_5000_lots=10,50_500_lots=none,lt50_lots=none")
     p.add_argument("--no-progress", action="store_true")
     return p
 
