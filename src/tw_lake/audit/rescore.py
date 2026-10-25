@@ -30,7 +30,8 @@ def _read(path: Path, columns: list[str]) -> pd.DataFrame:
     return pd.read_parquet(path, columns=[c for c in columns if c in have])
 
 
-def rescore(audit_dir: Path, out_dir: Path | None = None, allowance: dict | None = None) -> Path:
+def rescore(audit_dir: Path, out_dir: Path | None = None, allowance: dict | None = None,
+            require_close_auction: bool = True) -> Path:
     audit_dir = Path(audit_dir)
     day = _read(audit_dir / "audit_5m_by_symbol_day.parquet", DAY_INPUT_COLUMNS)
     rec_p = audit_dir / "audit_ohlcv_reconciliation.parquet"
@@ -39,9 +40,9 @@ def rescore(audit_dir: Path, out_dir: Path | None = None, allowance: dict | None
     bad = set(integ.loc[(integ["dataset"] == "fubon_5m") & (integ["status"] == "fail") & integ["partition"].notna(),
                         "partition"])
     allowance = parse_allowance(None) if allowance is None else allowance
-    ready = research_ready(day, rec, bad, allowance)
+    ready = research_ready(day, rec, bad, allowance, require_close_auction)
     hist = missing_by_liquidity(ready)
-    summ = readiness_summary(ready, allowance)
+    summ = readiness_summary(ready, allowance, require_close_auction)
 
     stamp = datetime.now(TAIPEI).strftime("%Y%m%d_%H%M%S")
     out = Path(out_dir) if out_dir else audit_dir / f"rescore_{READINESS_VERSION}_{stamp}"
@@ -68,8 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out-dir", default=None)
     p.add_argument("--missing-allowance", default=None,
                    help="e.g. ge5000_lots=0,500_5000_lots=3,50_500_lots=15,lt50_lots=none")
+    p.add_argument("--no-require-close-auction", action="store_true",
+                   help="accept tolerant days without a 13:30 auction bar when recon is ok (close already equal)")
     a = p.parse_args(argv)
-    out = rescore(Path(a.audit_dir), Path(a.out_dir) if a.out_dir else None, parse_allowance(a.missing_allowance))
+    out = rescore(Path(a.audit_dir), Path(a.out_dir) if a.out_dir else None, parse_allowance(a.missing_allowance),
+                  not a.no_require_close_auction)
     s = json.loads((out / "rescore_summary.json").read_text(encoding="utf-8"))["readiness"]
     print(f"rescore written to {out}")
     for k in ("ready_5m_normal_session", "ready_5m_no_trade_tolerant"):
