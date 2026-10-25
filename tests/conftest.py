@@ -119,6 +119,7 @@ class FakeFubon:
         self.close = finlab._frame("price:收盤價")
         self.high = finlab._frame("price:最高價")
         self.low = finlab._frame("price:最低價")
+        self.open = finlab._frame("price:開盤價")
         self.vol = finlab._frame("price:成交股數")
         self.not_found_symbols: set[str] = set()
         self.missing_days: dict[str, set] = {}
@@ -126,6 +127,8 @@ class FakeFubon:
         self.rate_limit_once: set[tuple] = set()
         self.price_shift: dict[tuple, float] = {}     # (symbol, date) -> added to all prices (conflicts)
         self.extra_bars: dict[str, list[dict]] = {}   # symbol -> raw rows appended (e.g. off-session)
+        self.drop_bars: set[tuple] = set()            # (symbol, date, "HH:MM") bars omitted (intraday hole)
+        self.only_bars: dict[tuple, set] = {}         # (symbol, date) -> {"HH:MM"} emitted (call-auction regime)
         self.calls: list[dict] = []
 
     def historical_candles(self, params: dict) -> dict:
@@ -154,12 +157,17 @@ class FakeFubon:
                 sh = self.price_shift.get((sym, d), 0.0)
                 lots = v / 1000.0
                 per = lots / 54
-                for j in range(54):
-                    t = datetime.combine(d, time(9, 0)) + timedelta(minutes=5 * j)
+                for j in range(54):   # real TWSE layout: 09:00..13:20 (53 bars) + 13:30 closing auction
+                    t = datetime.combine(d, time(9, 0)) + timedelta(minutes=5 * j + (5 if j == 53 else 0))
+                    hhmm = t.strftime("%H:%M")
+                    if (sym, d, hhmm) in self.drop_bars or ((sym, d) in self.only_bars
+                                                            and hhmm not in self.only_bars[(sym, d)]):
+                        continue
                     bh = h if j == 0 else c
                     bl = lo if j == 1 else c
-                    rows.append({"date": t.strftime("%Y-%m-%dT%H:%M:%S.000+08:00"), "open": c + sh,
-                                 "high": max(bh, c) + sh, "low": min(bl, c) + sh, "close": c + sh,
+                    bo = self.open.at[ts, sym] if j == 0 else c   # first trade = official open
+                    rows.append({"date": t.strftime("%Y-%m-%dT%H:%M:%S.000+08:00"), "open": bo + sh,
+                                 "high": max(bh, c, bo) + sh, "low": min(bl, c, bo) + sh, "close": c + sh,
                                  "volume": per, "average": c})
         for r in self.extra_bars.get(sym, []):
             if a <= date.fromisoformat(r["date"][:10]) <= b:
