@@ -55,24 +55,23 @@ def trading_regime_daily(disposal_info: pd.DataFrame | None, trading_days: list)
     ev = pd.DataFrame({"symbol": sym, "effective_from": start, "effective_to": end,
                        "auction_interval_min": interval, "known_at": known}).dropna(subset=["effective_from", "effective_to"])
     td = pd.DatetimeIndex(pd.to_datetime(sorted(trading_days)))
-    rows = []
-    for e in ev.itertuples(index=False):
-        lo = td.searchsorted(e.effective_from, side="left")
-        hi = td.searchsorted(e.effective_to, side="right")
-        if hi <= lo:
-            continue
-        days = td[lo:hi]
-        n = None if pd.isna(e.auction_interval_min) else int(e.auction_interval_min)
-        rows.append(pd.DataFrame({
-            "symbol": e.symbol, "date": days,
-            "regime": f"disposal_call_auction_{n}min" if n else "disposal_interval_unknown",
-            "auction_interval_min": n if n else np.nan, "effective_from": e.effective_from,
-            "effective_to": e.effective_to, "source": "finlab:disposal_information", "known_at": e.known_at,
-            "expected_bar_policy": "unknown_call_auction_count" if n else "unknown",
-        }))
-    if not rows:
+    lo = td.searchsorted(ev["effective_from"].values, side="left")
+    hi = td.searchsorted(ev["effective_to"].values, side="right")
+    n = np.maximum(hi - lo, 0)
+    if n.sum() == 0:
         return pd.DataFrame(columns=REGIME_COLUMNS)
-    out = pd.concat(rows, ignore_index=True)
+    idx = np.concatenate([np.arange(a, b) for a, b in zip(lo, hi) if b > a])
+    rep = ev.loc[ev.index.repeat(n)].reset_index(drop=True)
+    iv = rep["auction_interval_min"]
+    out = pd.DataFrame({
+        "symbol": rep["symbol"].values, "date": td.values[idx],
+        "regime": np.where(iv.notna(), "disposal_call_auction_" + iv.fillna(0).astype(int).astype(str) + "min",
+                           "disposal_interval_unknown"),
+        "auction_interval_min": iv.values, "effective_from": rep["effective_from"].values,
+        "effective_to": rep["effective_to"].values, "source": "finlab:disposal_information",
+        "known_at": rep["known_at"].values,
+        "expected_bar_policy": np.where(iv.notna(), "unknown_call_auction_count", "unknown"),
+    })
     # overlapping events: keep the longest interval (most restrictive) per symbol/date
     out = out.sort_values(["symbol", "date", "auction_interval_min"], ascending=[True, True, False])
     return out.drop_duplicates(["symbol", "date"]).reset_index(drop=True)[REGIME_COLUMNS]
@@ -87,10 +86,11 @@ def matrix_agreement(regime: pd.DataFrame, matrix: pd.DataFrame | None, name: st
         first = m.columns[0]
         m = m.rename(columns={first: "date"})
     m["date"] = pd.to_datetime(m["date"], errors="coerce").dt.normalize()
-    long = m.melt(id_vars=["date"], var_name="symbol", value_name="flag")
-    long = long[long["flag"].astype("boolean").fillna(False)]
+    m = m.set_index("date")
+    vals = m.apply(lambda c: c.astype("boolean").fillna(False)).to_numpy(dtype=bool)   # vectorized, no melt
+    r_i, c_i = np.nonzero(vals)
+    b = set(zip(m.columns.astype(str)[c_i], m.index[r_i]))
     a = set(zip(regime["symbol"].astype(str), pd.to_datetime(regime["date"])))
-    b = set(zip(long["symbol"].astype(str), long["date"]))
     lo = min((d for _, d in b), default=None)
     if lo is not None:
         a = {x for x in a if x[1] >= lo}

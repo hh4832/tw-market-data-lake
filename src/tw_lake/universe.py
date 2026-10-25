@@ -122,3 +122,34 @@ def minute_targets(master: pd.DataFrame, minute_start: date) -> pd.DataFrame:
     m = m[m["last_price_date"] >= pd.Timestamp(minute_start)]
     return m[["symbol", "instrument_type", "market", "first_price_date", "last_price_date",
               "listing_status_latest", "classification_source"]].sort_values("symbol").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------------- v2 (B5)
+UNIVERSE_V2_PROVENANCE = {
+    "has_price": "observed_at_date; known only after the close of date",
+    "has_trade": "observed_at_date; known only after the close of date",
+    "has_price_prev_day": "known_asof the open of date (previous trading day's observation)",
+    "has_trade_prev_day": "known_asof the open of date (previous trading day's observation)",
+    "listed_trading_days_before": "known_asof the open of date (count of earlier priced trading days)",
+    "is_first_listed_day": "reconstructed_ex_post (first FinLab price date, not an official listing date)",
+    "listing_status_expost": "reconstructed_ex_post (inferred from first/last FinLab price date)",
+    "tradable_status": "observed_at_date; known only after the close of date",
+    "instrument_type": "current_snapshot_applied_to_history (security_categories asof classification_asof)",
+    "market": "current_snapshot_applied_to_history (board transfers not reflected)",
+}
+
+
+def universe_daily_v2(uni_v1: pd.DataFrame) -> pd.DataFrame:
+    """Derived universe that separates same-day observations from what is known before the open.
+    For pre-open selection on date D use only *_prev_day / listed_trading_days_before columns."""
+    u = uni_v1.sort_values(["symbol", "date"]).reset_index(drop=True).copy()
+    g = u.groupby("symbol", sort=False)
+    u["has_price_prev_day"] = g["has_price"].shift(1).fillna(False).astype(bool)
+    u["has_trade_prev_day"] = g["has_trade"].shift(1).fillna(False).astype(bool)
+    u["listed_trading_days_before"] = g.cumcount().astype("int64")
+    u["is_first_listed_day"] = u["listed_trading_days_before"] == 0
+    u = u.rename(columns={"listing_status": "listing_status_expost"})
+    cols = ["date", "symbol", "has_price", "has_trade", "has_price_prev_day", "has_trade_prev_day",
+            "listed_trading_days_before", "is_first_listed_day", "listing_status_expost", "tradable_status",
+            "instrument_type", "market", "classification_source", "classification_asof", "classification_is_pit"]
+    return u[[c for c in cols if c in u.columns]]

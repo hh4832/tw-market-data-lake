@@ -20,6 +20,7 @@ KEY_COLUMNS = {
     "finlab_daily_raw": ["date", "symbol"],
     "finlab_daily_adjusted": ["date", "symbol"],
     "universe_daily": ["date", "symbol"],
+    "universe_daily_v2": ["date", "symbol"],
     "fubon_5m": ["bar_start"],
     "security_categories": None,          # snapshot: all columns are the key
     "disposal_attention": None,

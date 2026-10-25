@@ -8,12 +8,18 @@ Layout of one dataset root:
     <root>/_manifest/published.json                         pointer = current research version
     <root>/_manifest/.staging/                              in-flight manifest versions
 
-Write protocol for a data file (never overwrites):
+Write protocol for a data file (never overwrites, no rename on Drive):
     1. canonicalize + content hash
     2. if <hash>.parquet already exists -> read back, verify content hash, reuse
+       (an existing *unreferenced* file with wrong content/size is a crashed write: quarantined, rewritten)
     3. write to local tmp, read back, verify rows + content hash, compute SHA256
-    4. copy to Drive staging, verify SHA256
-    5. rename staging -> final path, verify SHA256
+    4. write directly to the final content-addressed path with exclusive create ('xb') + fsync,
+       verify SHA256. No staging->final rename: on Colab's Drive FUSE a rename right after a write
+       left 0-byte files on Drive (audit 2026-10-25, F1/F2) although local read-back passed.
+       A partial final file is harmless: the name is content-addressed and nothing references it
+       until the manifest commit; recovery reports it and the next write replaces it.
+    Durability on Drive cannot be proven from inside the same FUSE mount (reads hit the local
+    cache); run ``python -m tw_lake.audit.verify`` after flush/unmount + remount.
 Manifest commit (after all data files of a batch are published):
     6. write tables to local tmp, verify, copy to _manifest/.staging/<version>, verify SHA256
     7. rename to _manifest/versions/<version>
@@ -68,6 +74,18 @@ class StoreContext:
         d = Path(self.local_tmp) / self.run_id
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+
+def _durable_write(src: Path, dst: Path, fault: Callable[[str], None] = lambda s: None) -> None:
+    """Copy src to dst with exclusive create + fsync; never renames, never overwrites."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with open(src, "rb") as fi, open(dst, "xb") as fo:
+        first = fi.read(max(1, min(4096, os.path.getsize(src) // 2)))
+        fo.write(first)
+        fault("mid_publish")                       # test hook: crash with a partial final file
+        shutil.copyfileobj(fi, fo, 1 << 20)
+        fo.flush()
+        os.fsync(fo.fileno())
 
 
 def _move(src: Path, dst: Path) -> None:
@@ -213,30 +231,27 @@ class DatasetStore:
             if same:
                 local.unlink(missing_ok=True)
                 return record(file_sha256(final), final.stat().st_size, reused=True)
-            if partition not in self.bad_partitions:
+            referenced = rel.as_posix() in self._published_relpaths()
+            if referenced and partition not in self.bad_partitions:
                 raise ImmutableViolation(f"{final} exists with different content; refusing to overwrite")
-            q = layout.quarantine / ctx.run_id / self.name / "corrupt" / rel
+            sub = "corrupt" if referenced else "orphan_partial"
+            q = layout.quarantine / ctx.run_id / self.name / sub / rel
             layout.assert_writable(q)
-            _move(final, q)  # corrupt file is preserved for inspection, never deleted
+            _move(final, q)  # preserved for inspection, never deleted
 
         fsha = file_sha256(local)
         ctx.fault("after_local_verify")
-
-        staging = layout.staging / ctx.run_id / self.name / partition / fname
-        layout.assert_writable(staging)
-        staging.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(local, staging)
-        if file_sha256(staging) != fsha:
-            raise IntegrityError(f"staging SHA256 mismatch for {staging}")
-        ctx.fault("after_staging")
-
-        _move(staging, final)
+        _durable_write(local, final, fault=ctx.fault)
         if file_sha256(final) != fsha:
             raise IntegrityError(f"published SHA256 mismatch for {final}")
         nbytes = final.stat().st_size
         local.unlink(missing_ok=True)
         ctx.fault("after_publish")
         return record(fsha, nbytes, reused=False)
+
+    def _published_relpaths(self) -> set[str]:
+        parts = self.partitions()          # raises IntegrityError on a corrupt manifest (fail closed)
+        return set(parts["relpath"]) if len(parts) else set()
 
     def _existing_seqs(self) -> list[int]:
         if not self.versions_dir.exists():
@@ -285,7 +300,8 @@ class DatasetStore:
         layout.assert_writable(staging)
         if staging.exists():
             raise ImmutableViolation(f"manifest staging already exists: {staging}")
-        shutil.copytree(local_dir, staging)
+        for f in sorted(local_dir.iterdir()):             # per-file exclusive write + fsync (no copy2)
+            _durable_write(f, staging / f.name)
         for tname, info in table_meta.items():
             if file_sha256(staging / f"{tname}.parquet") != info["sha256"]:
                 raise IntegrityError(f"manifest staging SHA256 mismatch: {tname}")
@@ -308,8 +324,14 @@ class DatasetStore:
             **{k: v for k, v in (extra_meta or {}).items() if k in ("asof", "data_max_date")},
         }
         tmp = self.manifest_dir / f"published.json.{ctx.run_id}.tmp"
-        tmp.write_text(json.dumps(pointer, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        os.replace(tmp, self.pointer_path)
+        blob = json.dumps(pointer, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+        with open(tmp, "wb") as fh:
+            fh.write(blob)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.pointer_path)      # atomic pointer swap (the commit point)
+        if self.pointer_path.read_bytes() != blob:
+            raise IntegrityError(f"{self.name}: published.json read-back differs after commit")
         self._tables_cache = None
         return pointer
 

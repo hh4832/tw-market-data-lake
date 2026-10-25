@@ -38,6 +38,30 @@ WINDOW_COLUMNS = [
 ]
 
 
+# status = download/coverage status. data_quality_status is a separate, derived label (B4):
+# two identical API answers confirm a *source* gap, they do not make the data complete, and
+# intraday completeness is never asserted here (see the read-only audit / audit_research_ready).
+QUALITY_BY_STATUS = {
+    COMPLETE: "no_missing_days_intraday_unverified",
+    COMPLETE_WITH_GAPS: "source_gap_confirmed_by_repeat",
+    PARTIAL: "gaps_pending_retry",
+    FAILED: "not_usable",
+    CONFLICT: "not_usable_conflict",
+    PENDING: "not_fetched",
+    NO_DATA_MARKET_CLOSED: "no_data_expected",
+    NO_DATA_NOT_LISTED: "no_data_expected",
+    NO_DATA_DELISTED: "no_data_expected",
+    NO_DATA_NO_TRADE: "no_data_expected",
+}
+
+
+def with_quality_status(windows: pd.DataFrame) -> pd.DataFrame:
+    out = windows.copy()
+    out["data_quality_status"] = out["status"].map(QUALITY_BY_STATUS).fillna("unknown")
+    out["research_ready"] = "see_audit"          # decided by tw_lake.audit, never by ingestion
+    return out
+
+
 def empty_windows() -> pd.DataFrame:
     df = pd.DataFrame({c: pd.Series(dtype="object") for c in WINDOW_COLUMNS})
     for c in ("window_start", "window_end", "covered_to"):

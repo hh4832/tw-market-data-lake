@@ -51,13 +51,41 @@ def test_publish_reuse_and_versions(tmp_cfg, clock):
 def test_never_overwrites_different_content(tmp_cfg, clock):
     s = mkstore(tmp_cfg, clock)
     r = s.publish_partition(frame(), "snapshot")
+    s.commit({"partitions": pd.DataFrame([r])})
     fp = s.root / r["relpath"]
-    frame(shift=9).to_parquet(fp, index=False)       # tamper: same path, different content
+    frame(shift=9).to_parquet(fp, index=False)       # tamper a *published* file: same path, different content
     with pytest.raises(ImmutableViolation):
-        s.publish_partition(frame(), "snapshot")
+        mkstore(tmp_cfg, clock, run_id="r2").publish_partition(frame(), "snapshot")
 
 
-@pytest.mark.parametrize("stage", ["after_local_verify", "after_staging", "after_publish"])
+@pytest.mark.parametrize("damage", [b"", b"PAR1 truncated"])
+def test_unreferenced_partial_file_is_quarantined_and_rewritten(tmp_cfg, clock, damage):
+    """A crashed (or Drive-lost, 0-byte) write that no manifest references is replaced, never trusted."""
+    s = mkstore(tmp_cfg, clock)
+    r = s.publish_partition(frame(), "snapshot")     # not committed
+    fp = s.root / r["relpath"]
+    fp.write_bytes(damage)
+    s2 = mkstore(tmp_cfg, clock, run_id="r2")
+    r2 = s2.publish_partition(frame(), "snapshot")
+    assert not r2["reused"] and r2["relpath"] == r["relpath"]
+    assert fp.stat().st_size == r["file_bytes"]
+    q = list((s.ctx.layout.quarantine / "r2").rglob("*.parquet"))
+    assert len(q) == 1 and q[0].read_bytes() == damage and "orphan_partial" in str(q[0])
+
+
+def test_data_files_are_written_without_rename(tmp_cfg, clock, monkeypatch):
+    import os as _os
+    import tw_lake.store as st
+    calls = []
+    real = _os.replace
+    monkeypatch.setattr(st.os, "replace", lambda a, b: (calls.append((str(a), str(b))), real(a, b))[1])
+    s = mkstore(tmp_cfg, clock)
+    s.publish_partition(frame(), "snapshot")
+    assert not [c for c in calls if "/data/" in c[1]]   # no rename into data/
+    assert not (s.ctx.layout.staging).exists() or not any(s.ctx.layout.staging.rglob("*.parquet"))
+
+
+@pytest.mark.parametrize("stage", ["after_local_verify", "mid_publish", "after_publish"])
 def test_interrupted_data_write_leaves_manifest_untouched(tmp_cfg, clock, stage):
     s = mkstore(tmp_cfg, clock)
     s.commit({"partitions": pd.DataFrame([s.publish_partition(frame(), "snapshot")])})
@@ -74,10 +102,12 @@ def test_interrupted_data_write_leaves_manifest_untouched(tmp_cfg, clock, stage)
     moved = quarantine_system_staging(s3.ctx.layout, "r3")
     rep = s3.recovery_scan()
     assert rep["missing_files"] == [] and rep["corrupt_files"] == []
-    if stage == "after_staging":
-        assert moved == ["r2"]
-    if stage == "after_publish":
-        assert len(rep["orphan_files"]) == 1          # published but never committed: reported, kept
+    assert moved == []                                # data files no longer pass through staging
+    if stage in ("mid_publish", "after_publish"):
+        assert len(rep["orphan_files"]) == 1          # partial/complete but never committed: reported, kept
+    if stage == "mid_publish":                        # next write of the same content replaces the partial file
+        r = s3.publish_partition(frame(shift=3), "snapshot")
+        assert not r["reused"] and (s3.root / r["relpath"]).stat().st_size == r["file_bytes"]
 
 
 def test_interrupted_manifest_commit(tmp_cfg, clock):

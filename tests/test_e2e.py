@@ -205,3 +205,17 @@ def test_conflict_keeps_published_value(tmp_cfg, clock):
     after = s2.read_partition("symbol=2330/year=2023")
     pd.testing.assert_frame_equal(before.reset_index(drop=True), after.reset_index(drop=True))
     assert len(s2.tables()["conflicts_log"]) > 0
+
+
+def test_run_reconciliation_covers_only_fetched_ranges(tmp_cfg, clock):
+    """Audit F5: an update that only extends the current window must not reconcile older windows."""
+    fin = FakeFinlab(end=date(2024, 3, 15))
+    clock.set(datetime(2024, 3, 15, 17, 0, tzinfo=TAIPEI))
+    assert run(tmp_cfg, clock, fin, FakeFubon(fin)) == 0
+    fin2 = FakeFinlab(end=date(2024, 3, 29))
+    clock.set(datetime(2024, 3, 29, 17, 0, tzinfo=TAIPEI))
+    assert run(tmp_cfg, clock, fin2, FakeFubon(fin2), mode="update") == 0
+    runs = sorted((tmp_cfg.data_root / "_tw-market-data-lake" / "runs").iterdir())
+    rec = pd.read_parquet(runs[-1] / "qa_reconciliation_5m.parquet")
+    assert rec["date"].min() >= pd.Timestamp("2024-03-15")
+    assert "missing_in_source" not in set(rec["classification"])

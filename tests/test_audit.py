@@ -230,3 +230,20 @@ def test_classification_issues_flag_non_pit_and_etf_rule():
     prov = A4.provenance_table().set_index("column")
     assert not prov.loc["has_trade", "usable_for_same_day_pre_open_selection"]
     assert prov.loc["listing_status", "provenance"] == "reconstructed_ex_post"
+
+
+def test_verify_latest_run_detects_zero_byte_file(tmp_cfg, clock):
+    from tw_lake.audit.verify import latest_run_id, verify
+    from tw_lake.paths import Layout
+    build_lake(tmp_cfg, clock)
+    layout = Layout.from_config(tmp_cfg)
+    rid = latest_run_id(layout)
+    rep = verify(layout, rid)
+    assert rep["ok"] and rep["datasets"]["fubon_5m"]["checked_partitions"] > 0
+    root = tmp_cfg.data_root / "fubon_stock_5m"
+    ptr = json.loads((root / "_manifest" / "published.json").read_text())
+    parts = pd.read_parquet(root / "_manifest" / ptr["version_dir"] / "partitions.parquet")
+    (root / parts.iloc[0]["relpath"]).write_bytes(b"")
+    rep2 = verify(layout, rid)
+    assert not rep2["ok"] and any("zero_byte_file" in f["detail"] for f in rep2["failures"])
+    assert not verify(layout, None, check_all=True, deep_all=True)["ok"]

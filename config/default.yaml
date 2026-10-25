@@ -20,6 +20,7 @@ datasets:
   security_categories: finlab_stock_reference/security_categories
   disposal_attention: finlab_stock_reference/disposal_attention
   universe_daily: finlab_stock_reference/universe_daily
+  universe_daily_v2: finlab_stock_reference/universe_daily_v2   # B5 derived: same-day vs known-before-open
   fubon_symbol_master: fubon_stock_reference/symbol_master
   fubon_5m: fubon_stock_5m
 

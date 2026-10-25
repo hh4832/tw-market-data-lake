@@ -51,6 +51,11 @@ python -m tw_lake.cli --mode update
 
 結束代碼：`0` 成功、`2` 部分完成（有 failed/partial/conflict 或達請求上限）、`1` 失敗或被 lock 擋下。
 
+**每次寫入後的持久性驗證**（Drive FUSE 的讀取會命中本機快取，同一個掛載內看不出檔案是否真的上傳）：runner notebook
+在 run 結束後 `flush_and_unmount` → `mount` → `python -m tw_lake.audit.verify`（本次 run 寫的檔案逐一比對大小與 SHA256）。
+`PROBLEMS` 時不要使用那些分區，再跑一次 `update` 會自動重建。故障注入測試：`notebooks/TW_Market_Data_Lake_Fault_Injection.ipynb`
+（只寫 `00Quant_Research/_lake_fault_test/`）。
+
 ## 「從哪一天開始有新資料」怎麼看
 
 - `fubon_stock_5m/_manifest/versions/<最新>/coverage_by_window.parquet`：每個 symbol × window 的 `status` 與 `covered_to`

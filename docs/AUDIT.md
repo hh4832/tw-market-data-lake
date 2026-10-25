@@ -139,19 +139,19 @@
 - 訊號在桶完成之後才產生；最早可成交的時間是下一個可交易時點。最後一桶的訊號只能在次日開盤執行，或另外定義收盤競價規則。**嚴禁用還沒完成的 K 棒交易。**
 - 處置分盤日、`regime_unknown` 日，預設排除在 30m 研究之外（`ready_30m_resample=False`）。
 
-## 8. Phase B 修正提案（待確認，尚未執行）
+## 8. Phase B 狀態（2026-10-25，branch `phase-b/durable-publish-qa`）
 
-每一項都是獨立的 commit / PR，各自附測試，可以單獨回滾。
+| 項目 | 狀態 | commit |
+|---|---|---|
+| B1 發布協定：資料檔不 rename（獨占寫入 + fsync）、孤兒/0-byte 檔隔離後重寫、manifest 表 fsync、pointer 讀回比對、重新掛載後驗證 `tw_lake.audit.verify`（runner 自動執行）、故障注入 script/notebook | **已實作；Drive 實測待使用者執行故障注入 notebook** | `77d6e73` |
+| B2 回補 83 個空檔 symbol-year（166 窗）+ 7782 partial + security_categories | **待執行**：B1 故障注入 PASS 並合併後，跑一次 `update`（recovery 會自動偵測並重抓），再看 verify 與全量稽核 | — |
+| B3 run QA：只對帳本次抓取區間；`vendor_definition_diff` → `pending_verification`；收盤/開盤不一致 → suspect | 已實作 | `17a4969` |
+| B4 `coverage_by_window.data_quality_status`（complete_with_gaps = source_gap_confirmed_by_repeat）＋ `research_ready=see_audit` | 已實作（不改變排程行為） | `a572d6b` |
+| B5 `universe_daily_v2`（前一交易日欄位、provenance；v1 不動） | 已實作；下次 run 首次發布 | `a86c31f` |
+| B6 官方上市/下市/轉板/停止交易日資料源 | 未做：需先選定資料源（TWSE/TPEx 公開資料或付費源） | — |
+| B7 被排除 bars 逐根保存到 quarantine | 已實作 | `a572d6b` |
+| B8 5m→30m 重採樣 | 未做：AGENTS.md 規則 1 規定本 repo 不產出 30m 聚合；規格見第 7 節，建議放在研究 repo | — |
+| 稽核效能：regime / 處置矩陣向量化（~100 s → ~1 s） | 已實作 | `96959f9` |
 
-| 優先 | 範圍 | 最小修改 | 備註 |
-|---|---|---|---|
-| B1 | `store.py` 發布協定 | ① 先做故障注入（第 6 節）。② 依結果二選一：不在 Drive 上 rename，直接寫入 content-addressed 的最終檔名；或 rename 後強制 flush，再由獨立的驗證步驟（重新 mount 或 Drive API）確認大小後才 commit manifest。③ run 結束時加 post-commit 驗證，大小不符就讓 run 失敗並報告 | 不改 manifest 格式；向下相容 |
-| B2 | 回補 F1/F2 | 先做 dry-run：83 個 symbol-year（166 個窗）加 7782 partial（1 窗），約 167 個 request；security_categories 重新發布（只用 FinLab，不耗 API） | **需要授權才執行** |
-| B3 | `qa.py` / `jobs_fubon._artifacts` | 對帳只涵蓋實際抓取的窗（修 F5）；拿掉自動的 `vendor_definition_diff`，改成 `pending_verification`；加入 open/close 不一致與 5m 量大於日量的 suspect 判定 | 只影響 run 報表，不影響資料 |
-| B4 | `jobs_fubon.py` | `coverage_by_window` 新增 `data_quality_status` 與 `research_ready`，和 `download_status` 分開；「重試 2 次結果相同」改記為 `source_gap_confirmed_by_repeat`，不再視為完整 | 新欄位，舊欄位保留 |
-| B5 | `universe.py` | 新增衍生資料集 `universe_daily_v2`（不覆蓋 v1），欄位分成 `observed_at_date` / `reconstructed_ex_post` / `known_asof`，並加上 `has_trade_prev_day` 供開盤前篩選 | 官方上市主檔另外提案 |
-| B6 | `calendar.py` | 加入官方上市、下市、轉板、停止交易日與特別休市日的資料源（`known_at`） | 需要先選定資料源 |
-| B7 | `jobs_fubon._keep_listed_days` | 把被排除的 bars 寫進 quarantine 保存（目前只留每窗摘要），供 F9 這類邊界案例複核 | 只是新增保存 |
-| B8 | 30m 重採樣 | 依第 7 節的規格，做成獨立模組並附測試 | 只讀已發布的 5m |
-
-**Migration 與相容性**：資料檔與 manifest 格式都不變。新增的欄位或資料集以新的 seq 或新的 dataset 發布，舊版本保留不動。
+**B1 的限制**：「不 rename 就不會出現 0-byte」目前是依證據推測，須以故障注入 notebook 在真實 Drive 上驗證（T1 比較新舊協定；T2/T3 用真實 store 程式碼）。
+即使新協定 PASS，每次 run 之後仍以重新掛載後的 verify 為準。
