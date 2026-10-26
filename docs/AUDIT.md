@@ -335,3 +335,16 @@
   - `DAY_LEVEL_MISSING_VOLUME_ON_WHOLE_LOT_SHORT_DATE`：個股殘差是正向整張，屬日層級，定不到格。
   - 其他維持 UNRESOLVED。
 - **`complete_day_whole_lot_short`**：K 棒全到齊但量少整張的股票日。這是成交量品質旗標，不是缺棒。
+
+## 12. 官方成交量參考資料：正式批次（`tw_lake.reference.official_volume_batch`）
+
+- **範圍**：缺棒帳本中的每個交易日。
+  - 證交所：MI_INDEX（ALLBUT0999）、BFT41U、TWT53U、TWTC7U、BFIAUU（ALL）。
+  - 櫃買：dailyQuotes（EW）、舊版收盤行情（備援）、fixPricing、oddQuote、odd（type=Daily）、blockTrade/quote。
+- **可分段**：每個交易日一個 shard，先寫在本機，再複製到 `reference/official_volume/v1/shards/year=/date=/`，最後才寫 `_SUCCESS`。重跑時已完成的日期會跳過。
+  - 只有 `_SUCCESS`、`requests.parquet`、`components.parquet` 三個檔案都在，才算完成。
+- **速度**：兩個交易所同時抓，各自保持請求間隔，每天約 20 秒。`--max-minutes` 到時會停在兩個日期之間。
+- **錯誤處理**：失敗的請求（非 200，或該是 JSON 卻不是）依 10、30、90 秒退避重試。重試後仍失敗的日期不標記完成。連續 3 天失敗就停止。
+- **證據**：原始回應以 gzip 存檔，SHA-256 是解壓後內容的雜湊。`requests.parquet` 記錄 url、params、狀態、retrieved_at、known_at。
+  - 解析後的長表不保存，可用 reparse 從原始回應重建。保存的是 `components.parquet`（每股每報表的主要成交欄位）和 `unit_basis.csv`。
+- **對帳**：`recon` 讀所有完成的 shard，沿用試點的逐日驗證與分類規則，不發網路請求。

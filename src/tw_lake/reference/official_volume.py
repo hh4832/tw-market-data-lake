@@ -17,6 +17,7 @@ Writes only into the given out-dir, which must not be inside DATA_ROOT datasets.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import re
@@ -122,6 +123,12 @@ COUNT_HINTS = ("成交筆數", "筆數", "Transaction")
 def known_at(d: date) -> str:
     """Conservative availability time for after-close exchange reports (evening of the trade date)."""
     return f"{d.isoformat()}T20:00:00+08:00"
+
+
+def read_raw(path: Path) -> bytes:
+    """Saved response bytes (batch shards store them gzip-compressed; the SHA-256 is of the uncompressed body)."""
+    b = Path(path).read_bytes()
+    return gzip.decompress(b) if str(path).endswith(".gz") else b
 
 
 def http_get(url: str, params: dict, timeout: float = 30.0) -> tuple[int, bytes, str, str]:
@@ -281,7 +288,7 @@ def reparse(probe_dir: Path) -> Path:
     for r in rq.itertuples(index=False):
         if r.http_status != 200 or r.report not in eps:
             continue
-        df, info = parse_response(eps[r.report], date.fromisoformat(r.date), (probe_dir / r.raw_file).read_bytes())
+        df, info = parse_response(eps[r.report], date.fromisoformat(r.date), read_raw(probe_dir / r.raw_file))
         notes.append({"report": r.report, "date": r.date, "json": info["json"], "rows": info["rows"],
                       "notes": info.get("notes", "")})
         if len(df):
@@ -396,14 +403,14 @@ def discover_tpex(out_dir: Path, getter=http_get, sleep=time.sleep, max_pages: i
     return out
 
 
-def _fetch_one(ep: Endpoint, d: date, out: Path, getter, reqs: list, parsed: list, log) -> None:
+def _fetch_one(ep: Endpoint, d: date, out: Path, getter, reqs: list, parsed: list, log, compress: bool = False) -> None:
     params = {k: _fmt(v, d) for k, v in ep.params}
     t0 = datetime.now(TAIPEI).isoformat(timespec="seconds")
     status, body, ctype, final_url = getter(ep.url, params)
     sha = hashlib.sha256(body).hexdigest()
-    rel = Path("raw") / ep.exchange / ep.report / f"{d.isoformat()}.json"
+    rel = Path("raw") / ep.exchange / ep.report / f"{d.isoformat()}.json{'.gz' if compress else ''}"
     (out / rel).parent.mkdir(parents=True, exist_ok=True)
-    (out / rel).write_bytes(body)
+    (out / rel).write_bytes(gzip.compress(body, mtime=0) if compress else body)
     df, info = parse_response(ep, d, body) if status == 200 else (pd.DataFrame(), {"json": False})
     status_note = "soft_404_or_non_json" if status == 200 and not info.get("json") else ""
     reqs.append({"exchange": ep.exchange, "report": ep.report, "component": ep.component, "date": d.isoformat(),
@@ -421,17 +428,17 @@ def _fetch_one(ep: Endpoint, d: date, out: Path, getter, reqs: list, parsed: lis
 
 
 def probe(dates: list[date], out_dir: Path, endpoints: list[Endpoint] | None = None, getter=http_get,
-          sleep=time.sleep, log=print) -> Path:
+          sleep=time.sleep, log=print, out_path: Path | None = None, compress: bool = False) -> Path:
     endpoints = endpoints or ENDPOINTS
     started = datetime.now(TAIPEI)
-    out = Path(out_dir) / f"official_volume_probe_{started:%Y%m%d_%H%M%S}"
+    out = Path(out_path) if out_path else Path(out_dir) / f"official_volume_probe_{started:%Y%m%d_%H%M%S}"
     out.mkdir(parents=True, exist_ok=False)
     reqs, parsed = [], []
 
     def one_host(eps: list[Endpoint]) -> None:      # requests to one host stay sequential and paced
         for ep in eps:
             for d in dates:
-                _fetch_one(ep, d, out, getter, reqs, parsed, log)
+                _fetch_one(ep, d, out, getter, reqs, parsed, log, compress)
                 sleep(ep.pace_sec)
 
     hosts: dict[str, list[Endpoint]] = {}
