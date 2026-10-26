@@ -51,7 +51,7 @@ def foreign_currency_etf(sym: pd.Series) -> pd.Series:
 TOTAL_REPORTS = {"TWSE": ["MI_INDEX_ALLBUT0999"], "TPEX": ["dailyQuotes_EW", "old_daily_close_quotes"]}
 # reports that are alternatives of each other (subtract at most one of each group)
 EXCLUSIVE_GROUPS = [{"rep_BFIAUU_S", "rep_BFIAUU_ALL"}, {"rep_blockTrade_tradeInfo", "rep_blockTrade_quote"},
-                    {"rep_odd", "rep_odd_noType", "rep_odd_AL", "rep_odd_roc", "rep_odd_d8", "rep_odd_roc_EW"}]
+                    {"rep_odd", "rep_odd_noType", "rep_odd_AL", "rep_odd_roc", "rep_odd_d8", "rep_odd_roc_EW", "rep_odd_Daily"}]
 COUNT_WORDS = ("筆數", "Transaction")
 
 
@@ -121,7 +121,7 @@ def identity_tests(x: pd.DataFrame, ex: str, comps: list[str]) -> pd.DataFrame:
 
 def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int = 50, min_exact_pct: float = 99.0,
               parsed_file: Path | None = None, min_days_per_date: int = 30,
-              extra_probe_dirs: list[Path] | None = None) -> Path:
+              extra_probe_dirs: list[Path] | None = None, min_exact_pct_pattern: float = 60.0) -> Path:
     started = datetime.now(TAIPEI)
     out = Path(out_root) / f"volume_recon_{started:%Y%m%d_%H%M%S}"
     out.mkdir(parents=True, exist_ok=False)
@@ -183,24 +183,43 @@ def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int =
         residual_lots_median_nonzero=("residual_shares", lambda r: float((r[r.abs() >= 1] / TRADING_UNIT).median())
                                       if (r.abs() >= 1).any() else 0.0),
         whole_lot_residual_pct=("residual_shares", lambda r: round(100 * float(((r % TRADING_UNIT) == 0)[r.abs() >= 1].mean()), 1)
-                                if (r.abs() >= 1).any() else None)).reset_index()
+                                if (r.abs() >= 1).any() else None),
+        negative_residual_days=("residual_shares", lambda r: int((r <= -1).sum()))).reset_index()
     by_date["date_verified"] = (by_date["n_complete_days"] >= min_days_per_date) & (by_date["exact_pct"] >= min_exact_pct) \
         & by_date["exchange"].map(lambda e: identity.get(e, {}).get("subtract") is not None)
+    # a date fails only through whole-lot shortfalls of single symbols (the provider-intraday-short pattern seen in
+    # the Fubon cross-check: D candle == official, intraday candles short) -> the formula itself holds that day
+    by_date["date_pattern"] = np.where(
+        by_date["date_verified"], "verified",
+        np.where((by_date["n_complete_days"] >= min_days_per_date) & (by_date["exact_pct"] >= min_exact_pct_pattern)
+                 & (by_date["whole_lot_residual_pct"].fillna(0) >= 99.0) & (by_date["negative_residual_days"] == 0),
+                 "whole_lot_short_only", "formula_unverified"))
     by_date.to_csv(out / "identity_by_date.csv", index=False, encoding="utf-8-sig")
     dv = set(zip(by_date.loc[by_date["date_verified"], "exchange"], by_date.loc[by_date["date_verified"], "date"]))
+    wl = set(zip(by_date.loc[by_date["date_pattern"] == "whole_lot_short_only", "exchange"],
+                 by_date.loc[by_date["date_pattern"] == "whole_lot_short_only", "date"]))
     verified = pd.Series([(e, d) in dv for e, d in zip(x["exchange"], x["date"])], index=x.index)
+    wl_date = pd.Series([(e, d) in wl for e, d in zip(x["exchange"], x["date"])], index=x.index)
     has_missing = x["missing_slots"] > 0
+    r = x["residual_shares"]
+    whole_lot_short = (r >= TRADING_UNIT) & ((r % TRADING_UNIT) == 0)
     x["volume_bound_class"] = np.select(
-        [~has_missing, x["unit_unverified"], x["official_total"].isna(), ~verified,
-         x["residual_shares"] <= -1, x["residual_shares"].abs() < TRADING_UNIT, x["residual_shares"] >= TRADING_UNIT],
-        ["NO_MISSING_SLOTS", "UNIT_UNVERIFIED_EXCLUDED", "UNRESOLVED_NO_OFFICIAL_RECORD", "UNRESOLVED_IDENTITY_NOT_VERIFIED",
-         "VOLUME_EXCESS_UNEXPLAINED", "CANDIDATE_NO_BOARD_LOT_TRADE_BY_VOLUME_BOUND", "DAY_LEVEL_MISSING_VOLUME_EVIDENCED"],
-        default="UNRESOLVED_OTHER")
-    x["unlocatable_missing_shares"] = np.where(x["volume_bound_class"] == "DAY_LEVEL_MISSING_VOLUME_EVIDENCED",
-                                               x["residual_shares"], 0.0)
+        [~has_missing, x["unit_unverified"], x["official_total"].isna(),
+         verified & (r <= -1), verified & (r.abs() < TRADING_UNIT), verified & (r >= TRADING_UNIT),
+         wl_date & (r.abs() < 1), wl_date & whole_lot_short],
+        ["NO_MISSING_SLOTS", "UNIT_UNVERIFIED_EXCLUDED", "UNRESOLVED_NO_OFFICIAL_RECORD",
+         "VOLUME_EXCESS_UNEXPLAINED", "CANDIDATE_NO_BOARD_LOT_TRADE_BY_VOLUME_BOUND", "DAY_LEVEL_MISSING_VOLUME_EVIDENCED",
+         "CANDIDATE_NO_TRADE_SYMBOL_EXACT_DATE_WHOLE_LOT_SHORT", "DAY_LEVEL_MISSING_VOLUME_ON_WHOLE_LOT_SHORT_DATE"],
+        default="UNRESOLVED_IDENTITY_NOT_VERIFIED")
+    x["unlocatable_missing_shares"] = np.where(
+        x["volume_bound_class"].isin(["DAY_LEVEL_MISSING_VOLUME_EVIDENCED", "DAY_LEVEL_MISSING_VOLUME_ON_WHOLE_LOT_SHORT_DATE"]),
+        x["residual_shares"], 0.0)
+    # bars all present but volume short by whole lots (a volume-quality flag, not a gap)
+    x["complete_day_whole_lot_short"] = x["complete_day"] & ~x["unit_unverified"] & whole_lot_short
     keep = ["symbol", "date", "exchange", "liquidity_bucket", "day_status", "expected_slots", "real_bars", "missing_slots",
             "f_volume_shares", "official_total", "official_regular", "m_volume_shares", "residual_shares",
             "finlab_vs_official", "complete_day", "unit_unverified", "volume_bound_class", "unlocatable_missing_shares",
+            "complete_day_whole_lot_short",
             *[c for c in x.columns if c.startswith("rep_")]]
     x[keep].to_parquet(out / "volume_recon_symbol_day.parquet", index=False)
 
@@ -216,7 +235,8 @@ def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int =
     comp_res["abs_res"] = comp_res["residual_shares"].abs()
     comp_res.sort_values("abs_res", ascending=False).head(200)[keep].to_csv(
         out / "complete_day_top_residuals.csv", index=False, encoding="utf-8-sig")
-    explained = {"CANDIDATE_NO_BOARD_LOT_TRADE_BY_VOLUME_BOUND", "DAY_LEVEL_MISSING_VOLUME_EVIDENCED"}
+    explained = {"CANDIDATE_NO_BOARD_LOT_TRADE_BY_VOLUME_BOUND", "DAY_LEVEL_MISSING_VOLUME_EVIDENCED",
+                 "CANDIDATE_NO_TRADE_SYMBOL_EXACT_DATE_WHOLE_LOT_SHORT", "DAY_LEVEL_MISSING_VOLUME_ON_WHOLE_LOT_SHORT_DATE"}
     ex_rows = mx[mx["volume_bound_class"].isin(explained)]
     priority = x[(x["liquidity_bucket"] == "ge5000_lots") & has_missing][keep].head(500)
     priority.to_csv(out / "priority_liquid_missing_days.csv", index=False, encoding="utf-8-sig")
@@ -242,10 +262,19 @@ def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int =
                                                                      "missing_slots"].sum()),
             "day_level_missing_volume_symbol_days": int((mx["volume_bound_class"] == "DAY_LEVEL_MISSING_VOLUME_EVIDENCED").sum()),
             "unlocatable_missing_shares_total": float(mx["unlocatable_missing_shares"].sum()),
+            "explained_missing_slots_by_strength": {
+                "verified_date": int(mx.loc[mx["volume_bound_class"].isin(
+                    ["CANDIDATE_NO_BOARD_LOT_TRADE_BY_VOLUME_BOUND", "DAY_LEVEL_MISSING_VOLUME_EVIDENCED"]),
+                    "missing_slots"].sum()),
+                "whole_lot_short_date": int(mx.loc[mx["volume_bound_class"].isin(
+                    ["CANDIDATE_NO_TRADE_SYMBOL_EXACT_DATE_WHOLE_LOT_SHORT", "DAY_LEVEL_MISSING_VOLUME_ON_WHOLE_LOT_SHORT_DATE"]),
+                    "missing_slots"].sum())},
             "by_class": by_class.to_dict("records")},
         "provider_missing_days": prov[["symbol", "date", "official_total", "official_regular", "residual_shares",
                                        "volume_bound_class"]].to_dict("records"),
         "f13_excluded_symbol_days": int(x["unit_unverified"].sum()),
+        "complete_days_whole_lot_short": x[x["complete_day_whole_lot_short"]].groupby(["exchange", "date"]).agg(
+            symbol_days=("symbol", "size"), shares=("residual_shares", "sum")).reset_index().to_dict("records"),
         "statement": ("Pilot only. Classes are candidates; the gap ledger keeps every slot UNRESOLVED until the identity "
                       "and units are verified and reviewed. DAY_LEVEL_MISSING_VOLUME_EVIDENCED does not locate the slot."),
     }
