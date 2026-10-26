@@ -51,7 +51,7 @@ def foreign_currency_etf(sym: pd.Series) -> pd.Series:
 TOTAL_REPORTS = {"TWSE": ["MI_INDEX_ALLBUT0999"], "TPEX": ["dailyQuotes_EW", "old_daily_close_quotes"]}
 # reports that are alternatives of each other (subtract at most one of each group)
 EXCLUSIVE_GROUPS = [{"rep_BFIAUU_S", "rep_BFIAUU_ALL"}, {"rep_blockTrade_tradeInfo", "rep_blockTrade_quote"},
-                    {"rep_odd", "rep_odd_noType", "rep_odd_AL"}]
+                    {"rep_odd", "rep_odd_noType", "rep_odd_AL", "rep_odd_roc", "rep_odd_d8", "rep_odd_roc_EW"}]
 COUNT_WORDS = ("筆數", "Transaction")
 
 
@@ -90,7 +90,7 @@ def _total(x: pd.DataFrame, ex: str) -> pd.Series:
 def component_reports(x: pd.DataFrame, ex: str, components: dict) -> list[str]:
     tot = {f"rep_{r}" for r in TOTAL_REPORTS[ex]}
     return [c for c in x.columns if c.startswith("rep_") and c not in tot and components.get(c[4:], ("", ""))[0] == ex
-            and not str(components.get(c[4:], ("", ""))[1]).startswith("daily_total")]
+            and not str(components.get(c[4:], ("", ""))[1]).startswith(("daily_total", "market_"))]
 
 
 def identity_tests(x: pd.DataFrame, ex: str, comps: list[str]) -> pd.DataFrame:

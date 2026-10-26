@@ -69,6 +69,9 @@ ENDPOINTS: list[Endpoint] = [
              (("date", "{d8}"), ("selectType", "S"), ("response", "json")), 4.0),
     Endpoint("TWSE", "BFIAUU_ALL", "block", f"{TWSE}/block/BFIAUU",
              (("date", "{d8}"), ("selectType", "ALL"), ("response", "json")), 4.0),
+    # market-wide cumulative 5-second statistics (not per symbol; parsed by audit.intraday_profile)
+    Endpoint("TWSE", "MI_5MINS", "market_5s_cumulative", f"{TWSE}/afterTrading/MI_5MINS",
+             (("date", "{d8}"), ("response", "json")), 4.0),
     # TPEx (new site; candidates)
     Endpoint("TPEX", "dailyQuotes_EW", "daily_total", f"{TPEX}/afterTrading/dailyQuotes",
              (("date", "{dslash}"), ("type", "EW"), ("response", "json")), 2.5),
@@ -91,6 +94,12 @@ ENDPOINTS: list[Endpoint] = [
              (("date", "{dslash}"), ("response", "json")), 2.5),
     Endpoint("TPEX", "odd_AL", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
              (("date", "{dslash}"), ("type", "AL"), ("response", "json")), 2.5),
+    Endpoint("TPEX", "odd_roc", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
+             (("date", "{roc}"), ("response", "json")), 2.5),
+    Endpoint("TPEX", "odd_d8", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
+             (("date", "{d8}"), ("response", "json")), 2.5),
+    Endpoint("TPEX", "odd_roc_EW", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
+             (("date", "{roc}"), ("type", "EW"), ("response", "json")), 2.5),
     Endpoint("TPEX", "blockTrade_tradeInfo", "block", f"{TPEX}/blockTrade/tradeInfo",
              (("date", "{dslash}"), ("response", "json")), 2.5),
     Endpoint("TPEX", "blockTrade_quote", "block", f"{TPEX}/blockTrade/quote",
@@ -311,6 +320,35 @@ def _actions(text: str) -> list[str]:
                    if not a.startswith(("rsrc/", "css/", "js/", "zh-tw/", "en-us/", "ja-jp/", "text/", "application/"))})
 
 
+def inspect_tpex_page(out_dir: Path, page_url: str, getter=http_get, sleep=time.sleep, around: int = 500) -> Path:
+    """Save one TPEx page and its page scripts; print the code around every API action and every form
+    field name, so request parameters can be read from the site itself (no guessing)."""
+    out = Path(out_dir) / f"tpex_page_{datetime.now(TAIPEI):%Y%m%d_%H%M%S}"
+    out.mkdir(parents=True)
+    texts = {}
+    st, b, _, _ = getter(page_url, {})
+    (out / "page.html").write_bytes(b)
+    texts["page.html"] = b.decode("utf-8", errors="replace")
+    for sc in sorted(set(re.findall(r'<script[^>]+src="([^"]+)"', texts["page.html"]))):
+        if "rsrc/asset" in sc or "googletagmanager" in sc or "cloudflare" in sc:
+            continue
+        u = sc if sc.startswith("http") else "https://www.tpex.org.tw" + sc
+        s2, sb, _, _ = getter(u, {})
+        name = re.sub(r"[^A-Za-z0-9.]+", "_", sc)[-80:]
+        (out / name).write_bytes(sb)
+        texts[name] = sb.decode("utf-8", errors="replace")
+        sleep(0.5)
+    lines = [f"page: {page_url} http={st}"]
+    for name, t in texts.items():
+        for m in re.finditer(r"afterTrading/|blockTrade/|API_PATTERN|ACTION", t):
+            lines.append(f"--- {name} @{m.start()}\n{t[max(0, m.start() - around):m.start() + around]}")
+        fields = sorted(set(re.findall(r'<(?:input|select)[^>]*name="([^"]+)"', t)))
+        if fields:
+            lines.append(f"--- {name} form fields: {fields}")
+    (out / "inspection.txt").write_text("\n".join(lines), encoding="utf-8")
+    return out
+
+
 def discover_tpex(out_dir: Path, getter=http_get, sleep=time.sleep, max_pages: int = 80) -> Path:
     """Find the TPEx website JSON actions (API pattern /www/{LANG}/{ACTION}) for after-hours fixed price,
     odd lot and block trades: read the site menu json, open the matching pages and their page scripts,
@@ -412,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dates", default="", help="YYYY-MM-DD,... (pilot: keep it short)")
     p.add_argument("--reparse", default="", help="probe dir: re-parse saved raw responses, no network")
     p.add_argument("--discover-tpex", action="store_true", help="save TPEx OpenAPI spec + site scripts, list API paths")
+    p.add_argument("--inspect-tpex-page", default="", help="TPEx page url: save page + scripts, print API call code")
     p.add_argument("--out-dir", default="/content/tw_lake_official_volume")
     p.add_argument("--only", default="", help="comma separated report ids to probe")
     a = p.parse_args(argv)
@@ -419,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
         out = reparse(Path(a.reparse))
         print(pd.read_csv(out / "report_notes.csv").drop_duplicates("report").to_string(index=False))
         print(f"reparse written to {out}")
+        return 0
+    if a.inspect_tpex_page:
+        out = inspect_tpex_page(Path(a.out_dir), a.inspect_tpex_page)
+        print((out / "inspection.txt").read_text(encoding="utf-8")[:20000])
+        print(f"inspection written to {out}")
         return 0
     if a.discover_tpex:
         out = discover_tpex(Path(a.out_dir))
