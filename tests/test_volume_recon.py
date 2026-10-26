@@ -99,3 +99,34 @@ def test_recon_identity_and_classes(tmp_path):
     total_regular_p = TOTAL["P"] - FIXED["P"] - ODD["P"]
     assert np.isclose(m["unlocatable_missing_shares_total"], 3000 + total_regular_p)
     assert s["complete_days"]["exact_pct"] == 100.0
+
+
+def test_unit_multiplier_from_amount_and_notes_and_soft_404(tmp_path):
+    body = {"stat": "OK", "fields": ["證券代號", "證券名稱", "成交數量", "成交筆數", "成交金額", "成交價"],
+            "notes": ["除境外指數股票型基金及外國股票第二上市外，餘交易單位皆為千股。"],
+            "data": [["0050", "x", "10", "4", "1,608,000", "160.80"], ["0051", "y", "0", "0", "0", "63.50"]]}
+    ep = [e for e in OV.ENDPOINTS if e.report == "BFT41U"][0]
+    df, _ = OV.parse_response(ep, D, json.dumps(body, ensure_ascii=False).encode())
+    q = df[df["field"] == "成交數量"].set_index("symbol")
+    assert q.loc["0050", "shares"] == 10_000 and q.loc["0050", "multiplier_basis"] == "implied_amount"
+    assert q.loc["0051", "multiplier"] == 1000 and q.loc["0051", "multiplier_basis"] == "report_notes"
+
+    def html_200(url, params):
+        return 200, b"<!DOCTYPE html><html>404</html>", "text/html", url
+    out = OV.probe([D], tmp_path / "p", endpoints=[ep], getter=html_200, sleep=lambda _s: None, log=lambda *_a: None)
+    rq = pd.read_parquet(out / "requests.parquet").iloc[0]
+    assert rq["note"] == "soft_404_or_non_json" and rq["parsed_rows"] == 0
+
+
+def test_reparse_matches_probe(tmp_path):
+    out = OV.probe([D], tmp_path / "probe", getter=fake_get, sleep=lambda _s: None, log=lambda *_a: None)
+    rp = OV.reparse(out)
+    a = pd.read_parquet(out / "parsed_volume.parquet").sort_values(["report", "symbol", "field"]).reset_index(drop=True)
+    b = pd.read_parquet(rp / "parsed_volume.parquet").sort_values(["report", "symbol", "field"]).reset_index(drop=True)
+    pd.testing.assert_frame_equal(a, b)
+
+
+def test_foreign_currency_etf_rule():
+    from tw_lake.audit.volume_recon import foreign_currency_etf
+    s = pd.Series(["00636K", "00687C", "0050", "00679B", "2330", "00757M"])
+    assert foreign_currency_etf(s).tolist() == [True, True, False, False, False, True]

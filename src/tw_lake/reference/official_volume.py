@@ -141,10 +141,50 @@ def unit_multiplier(field: str) -> float:
     return 1000.0 if ("千股" in field or "(仟股)" in field or "仟股" in field) else 1.0
 
 
+AMOUNT_FIELDS = ("成交金額",)
+PRICE_FIELDS = ("成交價", "收盤價", "成交均價", "收盤")
+
+
+def _notes_text(obj) -> str:
+    parts = []
+    if isinstance(obj, dict):
+        for k in ("notes", "hints", "note"):
+            v = obj.get(k)
+            parts += [str(x) for x in v] if isinstance(v, list) else [str(v)] if v else []
+        for t in obj.get("tables", []) or []:
+            if isinstance(t, dict):
+                for k in ("notes", "hints"):
+                    v = t.get(k)
+                    parts += [str(x) for x in v] if isinstance(v, list) else [str(v)] if v else []
+    return " ".join(parts)
+
+
+def _row_multiplier(field: str, row, fields: list[str], notes: str) -> tuple[float, str]:
+    """Unit multiplier for one value: header text, then amount/(qty*price) implied, then report notes."""
+    if unit_multiplier(field) != 1.0:
+        return unit_multiplier(field), "header"
+    ai = next((i for i, f in enumerate(fields) if f.strip() in AMOUNT_FIELDS), None)
+    pi = next((i for i, f in enumerate(fields) if f.strip() in PRICE_FIELDS), None)
+    qi = fields.index(field)
+    if ai is not None and pi is not None and max(ai, pi, qi) < len(row):
+        a, p, q = _num(row[ai]), _num(row[pi]), _num(row[qi])
+        if a and p and q:
+            ratio = a / (q * p)
+            if 800 < ratio < 1250:
+                return 1000.0, "implied_amount"
+            if 0.8 < ratio < 1.25:
+                return 1.0, "implied_amount"
+    if "千股" in notes and field.strip() == "成交數量":
+        return 1000.0, "report_notes"
+    return 1.0, "default"
+
+
 def parse_response(ep: Endpoint, d: date, body: bytes) -> tuple[pd.DataFrame, dict]:
-    """Long rows: exchange, report, component, date, symbol, table, field, value, multiplier, shares."""
-    cols = ["exchange", "report", "component", "date", "symbol", "table", "field", "value", "multiplier", "shares"]
-    info = {"json": False, "tables": 0, "tables_with_code": 0, "rows": 0, "share_fields": [], "stat": None}
+    """Long rows: exchange, report, component, date, symbol, table, field, value, multiplier, multiplier_basis, shares."""
+    cols = ["exchange", "report", "component", "date", "symbol", "table", "field", "value", "multiplier",
+            "multiplier_basis", "shares"]
+    info = {"json": False, "tables": 0, "tables_with_code": 0, "rows": 0, "share_fields": [], "stat": None,
+            "notes": ""}
     try:
         obj = json.loads(body.decode("utf-8", errors="replace"))
         info["json"] = True
@@ -152,6 +192,8 @@ def parse_response(ep: Endpoint, d: date, body: bytes) -> tuple[pd.DataFrame, di
         return pd.DataFrame(columns=cols), info
     if isinstance(obj, dict):
         info["stat"] = obj.get("stat") or obj.get("status")
+    notes = _notes_text(obj)
+    info["notes"] = notes[:2000]
     rows = []
     tabs = _tables(obj)
     info["tables"] = len(tabs)
@@ -171,10 +213,64 @@ def parse_response(ep: Endpoint, d: date, body: bytes) -> tuple[pd.DataFrame, di
                     v = _num(r[i])
                     if v is None:
                         continue
-                    m = unit_multiplier(fields[i]) if not any(h in fields[i] for h in COUNT_HINTS) else 1.0
-                    rows.append((ep.exchange, ep.report, ep.component, d.isoformat(), sym, title, fields[i], v, m, v * m))
+                    if any(h in fields[i] for h in COUNT_HINTS):
+                        m, basis = 1.0, "count"
+                    else:
+                        m, basis = _row_multiplier(fields[i], r, fields, notes)
+                    rows.append((ep.exchange, ep.report, ep.component, d.isoformat(), sym, title, fields[i], v, m,
+                                 basis, v * m))
     info["rows"] = len(rows)
     return pd.DataFrame(rows, columns=cols), info
+
+
+def reparse(probe_dir: Path) -> Path:
+    """Re-parse the saved raw responses with the current parser (no network). Writes
+    <probe_dir>/reparse_<ts>/parsed_volume.parquet; the original files are not touched."""
+    probe_dir = Path(probe_dir)
+    rq = pd.read_parquet(probe_dir / "requests.parquet")
+    eps = {e.report: e for e in ENDPOINTS}
+    out = probe_dir / f"reparse_{datetime.now(TAIPEI):%Y%m%d_%H%M%S}"
+    out.mkdir()
+    frames, notes = [], []
+    for r in rq.itertuples(index=False):
+        if r.http_status != 200 or r.report not in eps:
+            continue
+        df, info = parse_response(eps[r.report], date.fromisoformat(r.date), (probe_dir / r.raw_file).read_bytes())
+        notes.append({"report": r.report, "date": r.date, "json": info["json"], "rows": info["rows"],
+                      "notes": info.get("notes", "")})
+        if len(df):
+            df["sha256"] = r.sha256
+            frames.append(df)
+    (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()).to_parquet(out / "parsed_volume.parquet",
+                                                                                  index=False)
+    pd.DataFrame(notes).to_csv(out / "report_notes.csv", index=False, encoding="utf-8-sig")
+    (out / "reparse_meta.json").write_text(json.dumps({"probe_version": PROBE_VERSION, "source": str(probe_dir)},
+                                                      ensure_ascii=False), encoding="utf-8")
+    return out
+
+
+TPEX_DISCOVERY = ["https://www.tpex.org.tw/openapi/swagger.json", "https://www.tpex.org.tw/rsrc/js/main.js",
+                  "https://www.tpex.org.tw/rsrc/asset/js/global.js"]
+
+
+def discover_tpex(out_dir: Path, getter=http_get) -> Path:
+    """Save TPEx OpenAPI spec and site scripts, and list every /www/zh-tw/... API path they mention."""
+    out = Path(out_dir) / f"tpex_discovery_{datetime.now(TAIPEI):%Y%m%d_%H%M%S}"
+    out.mkdir(parents=True)
+    found, rows = set(), []
+    for url in TPEX_DISCOVERY:
+        status, body, ctype, final = getter(url, {})
+        name = url.rsplit("/", 1)[1]
+        (out / name).write_bytes(body)
+        text = body.decode("utf-8", errors="replace")
+        paths = set(re.findall(r"/www/(?:zh-tw|en-us)/[A-Za-z0-9_/\-]+", text)) | \
+            set(re.findall(r'"(/v1/[A-Za-z0-9_/\-]+)"', text))
+        found |= paths
+        rows.append({"url": url, "http_status": status, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(),
+                     "paths_found": len(paths)})
+    pd.DataFrame(rows).to_csv(out / "discovery_requests.csv", index=False)
+    (out / "api_paths.txt").write_text("\n".join(sorted(found)), encoding="utf-8")
+    return out
 
 
 def probe(dates: list[date], out_dir: Path, endpoints: list[Endpoint] | None = None, getter=http_get,
@@ -194,11 +290,15 @@ def probe(dates: list[date], out_dir: Path, endpoints: list[Endpoint] | None = N
             (out / rel).parent.mkdir(parents=True, exist_ok=True)
             (out / rel).write_bytes(body)
             df, info = parse_response(ep, d, body) if status == 200 else (pd.DataFrame(), {"json": False})
+            if status == 200 and not info.get("json"):
+                status_note = "soft_404_or_non_json"
+            else:
+                status_note = ""
             reqs.append({"exchange": ep.exchange, "report": ep.report, "component": ep.component, "date": d.isoformat(),
                          "url": ep.url, "params": json.dumps(params, ensure_ascii=False), "final_url": final_url,
                          "http_status": status, "content_type": ctype, "bytes": len(body), "sha256": sha,
                          "raw_file": str(rel), "retrieved_at": t0, "known_at": known_at(d),
-                         "json": info.get("json"), "stat": str(info.get("stat")), "tables": info.get("tables", 0),
+                         "json": info.get("json"), "note": status_note, "stat": str(info.get("stat")), "tables": info.get("tables", 0),
                          "tables_with_code": info.get("tables_with_code", 0), "parsed_rows": info.get("rows", 0),
                          "share_fields": "|".join(info.get("share_fields", []))})
             if len(df):
@@ -211,8 +311,8 @@ def probe(dates: list[date], out_dir: Path, endpoints: list[Endpoint] | None = N
     rq.to_parquet(out / "requests.parquet", index=False)
     rq.to_csv(out / "requests.csv", index=False, encoding="utf-8-sig")
     pv = pd.concat(parsed, ignore_index=True) if parsed else pd.DataFrame(
-        columns=["exchange", "report", "component", "date", "symbol", "table", "field", "value", "multiplier", "shares",
-                 "sha256"])
+        columns=["exchange", "report", "component", "date", "symbol", "table", "field", "value", "multiplier",
+                 "multiplier_basis", "shares", "sha256"])
     pv.to_parquet(out / "parsed_volume.parquet", index=False)
     avail = rq.groupby(["exchange", "report", "component"]).agg(
         dates=("date", "size"), http_200=("http_status", lambda s: int((s == 200).sum())),
@@ -228,10 +328,22 @@ def probe(dates: list[date], out_dir: Path, endpoints: list[Endpoint] | None = N
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="tw_lake.reference.official_volume")
-    p.add_argument("--dates", required=True, help="YYYY-MM-DD,... (pilot: keep it short)")
+    p.add_argument("--dates", default="", help="YYYY-MM-DD,... (pilot: keep it short)")
+    p.add_argument("--reparse", default="", help="probe dir: re-parse saved raw responses, no network")
+    p.add_argument("--discover-tpex", action="store_true", help="save TPEx OpenAPI spec + site scripts, list API paths")
     p.add_argument("--out-dir", default="/content/tw_lake_official_volume")
     p.add_argument("--only", default="", help="comma separated report ids to probe")
     a = p.parse_args(argv)
+    if a.reparse:
+        out = reparse(Path(a.reparse))
+        print(pd.read_csv(out / "report_notes.csv").drop_duplicates("report").to_string(index=False))
+        print(f"reparse written to {out}")
+        return 0
+    if a.discover_tpex:
+        out = discover_tpex(Path(a.out_dir))
+        print((out / "api_paths.txt").read_text(encoding="utf-8"))
+        print(f"discovery written to {out}")
+        return 0
     dates = [date.fromisoformat(x.strip()) for x in a.dates.split(",") if x.strip()]
     eps = [e for e in ENDPOINTS if not a.only or e.report in set(a.only.split(","))]
     out = probe(dates, Path(a.out_dir), eps)
