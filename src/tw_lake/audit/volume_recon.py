@@ -40,6 +40,12 @@ from ..run_context import git_sha
 RECON_VERSION = "0.1.0"
 TRADING_UNIT = 1000.0
 F13_UNIT_UNVERIFIED = {"00636K", "00668K", "00657K", "00687C"}
+
+
+def foreign_currency_etf(sym: pd.Series) -> pd.Series:
+    """TWSE report notes: an ETF whose 6th code character is K, M, S or C trades in a foreign currency."""
+    s = sym.astype(str)
+    return s.str.startswith("00") & (s.str.len() == 6) & s.str[5].isin(list("KMSC"))
 TOTAL_REPORTS = {"TWSE": ["MI_INDEX_ALLBUT0999"], "TPEX": ["dailyQuotes_EW", "old_daily_close_quotes"]}
 COUNT_WORDS = ("筆數", "Transaction")
 
@@ -107,11 +113,12 @@ def identity_tests(x: pd.DataFrame, ex: str, comps: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int = 50, min_exact_pct: float = 99.0) -> Path:
+def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int = 50, min_exact_pct: float = 99.0,
+              parsed_file: Path | None = None) -> Path:
     started = datetime.now(TAIPEI)
     out = Path(out_root) / f"volume_recon_{started:%Y%m%d_%H%M%S}"
     out.mkdir(parents=True, exist_ok=False)
-    parsed = pd.read_parquet(Path(probe_dir) / "parsed_volume.parquet")
+    parsed = pd.read_parquet(Path(parsed_file) if parsed_file else Path(probe_dir) / "parsed_volume.parquet")
     reqs = pd.read_parquet(Path(probe_dir) / "requests.parquet")
     components = {r.report: (r.exchange, r.component) for r in reqs.drop_duplicates("report").itertuples()}
     comp = component_table(parsed)
@@ -129,7 +136,7 @@ def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int =
     x["finlab_vs_official"] = x["f_volume_shares"] - x["official_total"]
     x["complete_day"] = (x["missing_slots"] == 0) & (x["real_bars"] > 0)
     ratio = x["m_volume_shares"] / x["f_volume_shares"].where(x["f_volume_shares"] > 0)
-    x["unit_unverified"] = x["symbol"].isin(F13_UNIT_UNVERIFIED) | (ratio > 5)
+    x["unit_unverified"] = x["symbol"].isin(F13_UNIT_UNVERIFIED) | foreign_currency_etf(x["symbol"]) | (ratio > 5)
 
     tests, identity = [], {}
     for ex in ("TWSE", "TPEX"):
@@ -187,6 +194,9 @@ def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int =
     prov.to_csv(out / "provider_missing_days.csv", index=False, encoding="utf-8-sig")
     summ = {
         "recon_version": RECON_VERSION, "git_sha": git_sha(), "probe_dir": str(probe_dir), "ledger_dir": str(ledger_dir),
+        "parsed_file": str(parsed_file) if parsed_file else "parsed_volume.parquet",
+        "unit_basis": parsed.groupby(["report", "multiplier_basis"]).size().rename("n").reset_index().to_dict("records")
+        if "multiplier_basis" in parsed.columns else None,
         "dates": dates, "symbol_days_in_scope": int(len(x)), "exchange_counts": x["exchange"].value_counts().to_dict(),
         "identity": identity,
         "finlab_vs_official_on_complete_days": tt[tt["subtract"] == "FINLAB_vs_OFFICIAL_TOTAL"].to_dict("records"),
@@ -223,8 +233,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--probe-dir", required=True)
     p.add_argument("--ledger-dir", required=True)
     p.add_argument("--out-dir", default="/content/tw_lake_volume_recon")
+    p.add_argument("--parsed-file", default=None, help="e.g. <probe>/reparse_<ts>/parsed_volume.parquet")
     a = p.parse_args(argv)
-    out = run_recon(Path(a.probe_dir), Path(a.ledger_dir), Path(a.out_dir))
+    out = run_recon(Path(a.probe_dir), Path(a.ledger_dir), Path(a.out_dir),
+                    parsed_file=Path(a.parsed_file) if a.parsed_file else None)
     print((out / "volume_recon_summary.md").read_text(encoding="utf-8"))
     print(f"volume recon written to {out}")
     return 0
