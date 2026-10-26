@@ -87,6 +87,10 @@ ENDPOINTS: list[Endpoint] = [
              (("date", "{dslash}"), ("type", "EW"), ("response", "json")), 2.5),
     Endpoint("TPEX", "odd", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
              (("date", "{dslash}"), ("type", "EW"), ("response", "json")), 2.5),
+    Endpoint("TPEX", "odd_noType", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
+             (("date", "{dslash}"), ("response", "json")), 2.5),
+    Endpoint("TPEX", "odd_AL", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
+             (("date", "{dslash}"), ("type", "AL"), ("response", "json")), 2.5),
     Endpoint("TPEX", "blockTrade_tradeInfo", "block", f"{TPEX}/blockTrade/tradeInfo",
              (("date", "{dslash}"), ("response", "json")), 2.5),
     Endpoint("TPEX", "blockTrade_quote", "block", f"{TPEX}/blockTrade/quote",
@@ -98,7 +102,7 @@ ENDPOINTS: list[Endpoint] = [
 ]
 
 CODE_FIELDS = ("證券代號", "股票代號", "代號", "證券代碼", "代碼", "Code", "Security Code")
-SHARE_HINTS = ("成交股數", "股數", "成交數量", "成交量", "Volume")
+SHARE_HINTS = ("成交股數", "股數", "成交數量", "成交量", "張數", "Volume")
 COUNT_HINTS = ("成交筆數", "筆數", "Transaction")
 
 
@@ -151,7 +155,18 @@ def _tables(obj) -> list[tuple[str, list[str], list[list]]]:
 
 
 def unit_multiplier(field: str) -> float:
-    return 1000.0 if ("千股" in field or "(仟股)" in field or "仟股" in field) else 1.0
+    """Header-declared unit: 千股/仟股/張 = 1,000 shares (board lot; foreign-currency ETFs differ and are
+    excluded from reconciliation)."""
+    return 1000.0 if ("千股" in field or "仟股" in field or "張" in field) else 1.0
+
+
+DATE_FIELDS = ("成交日期", "日期")
+
+
+def _row_date_matches(v, d: date) -> bool:
+    s = re.sub(r"[^0-9]", "", str(v))
+    roc = f"{d.year - 1911}{d:%m%d}"
+    return s in (roc, d.strftime("%Y%m%d"))
 
 
 AMOUNT_FIELDS = ("成交金額",)
@@ -215,6 +230,11 @@ def parse_response(ep: Endpoint, d: date, body: bytes) -> tuple[pd.DataFrame, di
         if ci is None:
             continue
         info["tables_with_code"] += 1
+        di = next((i for i, f in enumerate(fields) if f.strip() in DATE_FIELDS), None)
+        if di is not None:                    # multi-day tables (e.g. TPEx blockTrade/tradeInfo): keep the asked date
+            n0 = len(data)
+            data = [r for r in data if isinstance(r, (list, tuple)) and len(r) > di and _row_date_matches(r[di], d)]
+            info["date_filtered"] = f"{len(data)}/{n0}"
         si = [i for i, f in enumerate(fields) if any(h in f for h in SHARE_HINTS + COUNT_HINTS)]
         info["share_fields"] = sorted(set(info["share_fields"]) | {fields[i] for i in si})
         for r in data:
@@ -257,6 +277,7 @@ def reparse(probe_dir: Path) -> Path:
     (pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()).to_parquet(out / "parsed_volume.parquet",
                                                                                   index=False)
     pd.DataFrame(notes).to_csv(out / "report_notes.csv", index=False, encoding="utf-8-sig")
+    rq.to_parquet(out / "requests.parquet", index=False)      # lets a reparse folder act as a probe dir
     (out / "reparse_meta.json").write_text(json.dumps({"probe_version": PROBE_VERSION, "source": str(probe_dir)},
                                                       ensure_ascii=False), encoding="utf-8")
     return out

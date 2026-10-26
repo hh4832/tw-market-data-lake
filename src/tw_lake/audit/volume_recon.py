@@ -50,7 +50,8 @@ def foreign_currency_etf(sym: pd.Series) -> pd.Series:
     return s.str.startswith("00") & (s.str.len() == 6) & s.str[5].isin(list("KMSC"))
 TOTAL_REPORTS = {"TWSE": ["MI_INDEX_ALLBUT0999"], "TPEX": ["dailyQuotes_EW", "old_daily_close_quotes"]}
 # reports that are alternatives of each other (subtract at most one of each group)
-EXCLUSIVE_GROUPS = [{"rep_BFIAUU_S", "rep_BFIAUU_ALL"}, {"rep_blockTrade_tradeInfo", "rep_blockTrade_quote"}]
+EXCLUSIVE_GROUPS = [{"rep_BFIAUU_S", "rep_BFIAUU_ALL"}, {"rep_blockTrade_tradeInfo", "rep_blockTrade_quote"},
+                    {"rep_odd", "rep_odd_noType", "rep_odd_AL"}]
 COUNT_WORDS = ("筆數", "Transaction")
 
 
@@ -63,7 +64,8 @@ def component_table(parsed: pd.DataFrame) -> pd.DataFrame:
     main = {}
     for rep, g in p.groupby("report"):
         fields = list(dict.fromkeys(g["field"]))
-        main[rep] = next((f for f in fields if f.strip().startswith("成交股數")), fields[0])
+        main[rep] = next((f for pref in ("成交股數", "成交張數", "成交數量", "成交量")
+                          for f in fields if f.strip().startswith(pref)), fields[0])
     p = p[p.apply(lambda r: r["field"] == main[r["report"]], axis=1)]
     w = p.groupby(["symbol", "date", "report"])["shares"].sum().unstack("report")
     w.columns = [f"rep_{c}" for c in w.columns]

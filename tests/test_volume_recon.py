@@ -169,3 +169,20 @@ def test_identity_is_verified_per_date(tmp_path):
     r = pd.read_parquet(out / "volume_recon_symbol_day.parquet").set_index(["symbol", "date"])["volume_bound_class"]
     assert r[("A", "2025-06-23")] == "CANDIDATE_NO_BOARD_LOT_TRADE_BY_VOLUME_BOUND"
     assert r[("A", "2025-06-24")] == "UNRESOLVED_IDENTITY_NOT_VERIFIED"
+
+
+def test_tpex_lots_field_and_multi_day_block_table():
+    fixp = {"stat": "ok", "tables": [{"title": "盤後定價行情", "fields": ["代號", "名稱", "委買張數", "成交筆數", "成交張數",
+                                                                     "成交金額", "成交價(元)"],
+                                      "data": [["00679B", "x", "1,351", "35", "75", "2,177,250", "29.03"]]}]}
+    ep = [e for e in OV.ENDPOINTS if e.report == "fixPricing"][0]
+    df, _ = OV.parse_response(ep, D, json.dumps(fixp, ensure_ascii=False).encode())
+    from tw_lake.audit.volume_recon import component_table
+    ct = component_table(df).set_index("symbol")
+    assert ct.loc["00679B", "rep_fixPricing"] == 75_000                       # 成交張數 x 1000, not 委買張數
+    block = {"stat": "ok", "tables": [{"title": "個股單一證券鉅額", "fields": ["證券代號", "名 稱", "成交日期", "成交股數"],
+                                       "data": [["6488", "x", 1140623, "500,000"], ["6488", "x", 1140624, "9,000,000"],
+                                                ["6488", "x", 1140623, "200,000"]]}]}
+    ep = [e for e in OV.ENDPOINTS if e.report == "blockTrade_tradeInfo"][0]
+    df, info = OV.parse_response(ep, D, json.dumps(block, ensure_ascii=False).encode())   # D = 2025-06-23
+    assert df[df["field"] == "成交股數"]["shares"].sum() == 700_000 and info["date_filtered"] == "2/3"
