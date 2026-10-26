@@ -198,3 +198,31 @@
 這類日子現在歸為 `no_regular_session_trade_probable`，evidence 會加上 `finlab_close_missing=True`。
 以全量稽核資料重算：source_missing_suspected 14 → 3（00720B 2025-06-23、4716 2025-06-23、3454 2026-03-30），unresolved 510 → 1（6144 2026-06-23），其餘歸為無一般盤成交。
 經使用者授權，以 `--refetch-gap-days` 重抓這 15 天：原 14 天加 6144，共 14 個視窗。
+
+## 10. 缺棒證據帳本 v0（Gap Evidence Ledger，2026-10-26）
+
+起因：GPT 複核要求，每一個應有行情的 5 分格點沒有 K 棒時，都要有可追溯的原因與證據。84.66% 是研究篩選比例，不是缺口解釋完成率。
+
+`python -m tw_lake.audit.gap_ledger`（唯讀，Gap Ledger notebook 第 1–6 格）
+
+- **分母**：5m 時期中，FinLab 有成交或富邦有 K 棒的股票日。正常盤且有模板的日子，期待模板內所有格點：09:00–13:20 連續格點，加上 13:30 收盤集合競價（獨立的格點類別）。處置分盤日記為 `special_auction_or_halt`，不套 54 根；沒有模板的日子記為 `regime_unknown`。FinLab 成交量為 0 的掛牌日另外計數，不展開成格點。
+- **格點狀態**：
+  - `REAL_BAR`
+  - `PROVIDER_MISSING_EVIDENCED`：明列的 4 天整日缺漏，只證明富邦缺資料，不是無成交證明
+  - `UNRESOLVED`：其餘全部
+  
+  `evidence_candidate` 只是提示，不會改變狀態：`volume_conserved_exact` / `volume_shortfall` / `volume_excess` / `finlab_close_missing` / `whole_day_no_bars`。
+- **成交量守恆**：FinLab 日成交股數減去 5m 加總，差值精確到 1 股才算 exact。exact 能否成為「缺棒內無成交」的證據，取決於 FinLab 日量包含哪些交易（一般盤；鉅額、盤後定價、零股是否包含）。帳本在「所有格點都有 K 棒」的日子實測 `conservation_on_complete_days`，不做假設。
+- **邏輯遺漏偵測**：
+  - systemic slots：同一日同一格點，高流動股有 ≥20% 缺棒
+  - date spikes：整日缺漏比例或高流動缺棒比例異常偏高的日期（robust z > 4）
+  - 模板外 K 棒
+- **證據欄位**：`symbol, date, start_slot, end_slot, bar_start_from/to, n_slots, status, evidence_level, evidence_candidate, evidence_source, request_id, response_hash, manifest_seq, checked_at, known_at, notes, research_eligible`。連續缺棒壓縮成區間儲存，可還原每一個格點。歷史抓取沒有保存 request id 和 response hash，這兩欄為 null。
+- **輸出**：`gap_day_summary`（每股票日一列）、`gap_runs/part-*.parquet`、`gap_slot_crosssection`、`gap_systemic_slots`、`gap_date_spikes`、`gap_ledger_summary.json/.md`。
+
+`python -m tw_lake.audit.api_spotcheck`（唯讀 API，notebook 第 7–9 格）
+
+- 從帳本分層抽樣：高流動有缺棒、量不足、量守恆但有缺棒、整日缺漏、完整日對照組，另加指定日。每個股票日向富邦歷史 K 線查詢 1 次，逐格點比對。
+- 判定：`logic_loss`（API 有、我們沒存，屬程式遺漏）、`value_mismatch`、`stored_not_in_api`、`consistent`。每個回應都存 JSON 並記 SHA-256。`consistent` 只表示富邦現在給的與已存的一致，不是無成交證據。
+
+**尚未解決**：歷史逐筆證據。富邦/Fugle 歷史端點只有 K 線，逐筆只有當日。要把 `UNRESOLVED` 升級成無成交證據，需要官方日量組成（一般盤、鉅額、盤後定價、零股）或交易所歷史逐筆資料。來源與取得方式待使用者決定。
