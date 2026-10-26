@@ -132,17 +132,26 @@ def test_foreign_currency_etf_rule():
     assert foreign_currency_etf(s).tolist() == [True, True, False, False, False, True]
 
 
-def test_tpex_discovery_reads_sitemap_pages(tmp_path):
-    sitemap = ('<a href="/zh-tw/mainboard/trading/info/fixed.html">盤後定價交易</a>'
-               '<a href="/zh-tw/about/x.html">關於我們</a>').encode()
-    page = b'<script>const q = API_PATTERN.replace(/{ACTION}/, "afterTrading/fixedPriceQuotes");</script>'
+def test_tpex_discovery_reads_menu_pages(tmp_path):
+    menu = json.dumps({"data": [{"title": "上櫃", "menu": [{"title": "盤後定價交易", "url": "/zh-tw/mainboard/trading/info/fixed.html"},
+                                                         {"title": "關於我們", "url": "/zh-tw/about/x.html"}]}]},
+                      ensure_ascii=False).encode()
+    page = (b'<script src="/rsrc/asset/js/global.js"></script><script src="/rsrc/js/page-fixed.js"></script>'
+            b'<script>const q = API_PATTERN.replace(/{ACTION}/, "afterTrading/fixedPriceQuotes");</script>')
+    script = b'$.getJSON(api("afterTrading/fixedPriceStat"))'
 
     def get(url, params):
-        body = sitemap if url.endswith("sitemap.html") else page if url.endswith("fixed.html") else b"{}"
+        body = menu if url.endswith("menu.json") else page if url.endswith("fixed.html") else \
+            script if url.endswith("page-fixed.js") else b"{}"
         return 200, body, "text/html", url
     out = OV.discover_tpex(tmp_path, getter=get, sleep=lambda _s: None)
     p = pd.read_csv(out / "pages.csv")
-    assert len(p) == 1 and p.iloc[0]["title"] == "盤後定價交易" and "afterTrading/fixedPriceQuotes" in p.iloc[0]["actions"]
+    assert len(p) == 1 and "盤後定價交易" in p.iloc[0]["title"]
+    assert "afterTrading/fixedPriceQuotes" in p.iloc[0]["actions"]
+    assert "afterTrading/fixedPriceStat" in p.iloc[0]["script_actions"]
+    empty = OV.discover_tpex(tmp_path / "e", getter=lambda u, p: (200, b"<html></html>", "text/html", u),
+                             sleep=lambda _s: None)
+    assert pd.read_csv(empty / "pages.csv").empty                              # no crash on an empty menu
 
 
 def test_identity_is_verified_per_date(tmp_path):

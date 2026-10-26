@@ -250,43 +250,73 @@ def reparse(probe_dir: Path) -> Path:
 
 
 TPEX_DISCOVERY = ["https://www.tpex.org.tw/openapi/swagger.json", "https://www.tpex.org.tw/rsrc/js/main.js"]
-TPEX_SITEMAP = "https://www.tpex.org.tw/zh-tw/sitemap.html"
+TPEX_MENU = "https://www.tpex.org.tw/data/menu/zh-tw/menu.json"      # the site builds its sitemap from this
 TPEX_PAGE_KEYWORDS = ("盤後定價", "零股", "鉅額", "收盤行情", "定價")
 ACTION_RE = re.compile(r"""["'`]((?:[a-z][A-Za-z]*/)+[a-z][A-Za-z]*)["'`]""")
+PAGE_COLUMNS = ["title", "url", "http_status", "actions", "page_scripts", "script_actions"]
+
+
+def _menu_items(node, trail=()):
+    """Yield (title path, url) from the TPEx menu json, whatever the nesting keys are."""
+    if isinstance(node, dict):
+        title = str(node.get("title") or node.get("name") or "")
+        url = node.get("url") or node.get("link") or node.get("href")
+        t = trail + ((title,) if title else ())
+        if isinstance(url, str) and url:
+            yield " > ".join(t), url
+        for v in node.values():
+            if isinstance(v, (list, dict)):
+                yield from _menu_items(v, t)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _menu_items(v, trail)
+
+
+def _actions(text: str) -> list[str]:
+    return sorted({a for a in ACTION_RE.findall(text)
+                   if not a.startswith(("rsrc/", "css/", "js/", "zh-tw/", "en-us/", "ja-jp/", "text/", "application/"))})
 
 
 def discover_tpex(out_dir: Path, getter=http_get, sleep=time.sleep, max_pages: int = 80) -> Path:
     """Find the TPEx website JSON actions (API pattern /www/{LANG}/{ACTION}) for after-hours fixed price,
-    odd lot and block trades: read the sitemap, open the trading pages, list the action-like strings
-    each page script uses. The OpenAPI (latest day only, no date parameter) is saved for reference."""
+    odd lot and block trades: read the site menu json, open the matching pages and their page scripts,
+    list the action-like strings. The OpenAPI (latest day only, no date parameter) is saved for reference."""
     out = Path(out_dir) / f"tpex_discovery_{datetime.now(TAIPEI):%Y%m%d_%H%M%S}"
     (out / "pages").mkdir(parents=True)
     rows = []
-    for url in TPEX_DISCOVERY:
+    for url in TPEX_DISCOVERY + [TPEX_MENU]:
         status, body, ctype, final = getter(url, {})
         (out / url.rsplit("/", 1)[1]).write_bytes(body)
         rows.append({"url": url, "http_status": status, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()})
-    status, body, _, _ = getter(TPEX_SITEMAP, {})
-    (out / "sitemap.html").write_bytes(body)
-    html = body.decode("utf-8", errors="replace")
-    links = []
-    for m in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, flags=re.S):
-        href, text = m.group(1), re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        if "/zh-tw/" in href and href.endswith(".html") and any(k in text for k in TPEX_PAGE_KEYWORDS):
-            links.append((href if href.startswith("http") else "https://www.tpex.org.tw" + href, text))
-    pages = []
-    for href, text in list(dict.fromkeys(links))[:max_pages]:
+    pd.DataFrame(rows).to_csv(out / "discovery_requests.csv", index=False)
+    try:
+        menu = json.loads((out / "menu.json").read_bytes().decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001
+        menu = {}
+    items = [(t, u if u.startswith("http") else "https://www.tpex.org.tw" + (u if u.startswith("/") else "/" + u))
+             for t, u in _menu_items(menu)]
+    pd.DataFrame(items, columns=["title", "url"]).to_csv(out / "menu_items.csv", index=False, encoding="utf-8-sig")
+    wanted = [(t, u) for t, u in dict.fromkeys(items) if any(k in t for k in TPEX_PAGE_KEYWORDS) and u.endswith(".html")]
+    pages, seen_scripts = [], {}
+    for title, href in wanted[:max_pages]:
         st, b, _, _ = getter(href, {})
-        name = re.sub(r"[^A-Za-z0-9]+", "_", href.split("/zh-tw/")[-1])[:120]
+        name = re.sub(r"[^A-Za-z0-9]+", "_", href.split("tpex.org.tw/")[-1])[:120]
         (out / "pages" / name).write_bytes(b)
         page = b.decode("utf-8", errors="replace")
-        acts = sorted({a for a in ACTION_RE.findall(page) if not a.startswith(("rsrc/", "css/", "js/", "zh-tw/", "en-us/"))})
-        scripts = sorted(set(re.findall(r'<script[^>]+src="([^"]+)"', page)))
-        pages.append({"title": text, "url": href, "http_status": st, "actions": "|".join(acts),
-                      "page_scripts": "|".join(s for s in scripts if "rsrc/asset" not in s)})
+        scripts = sorted({x for x in re.findall(r'<script[^>]+src="([^"]+)"', page)
+                          if "rsrc/asset" not in x and "googletagmanager" not in x and "cloudflare" not in x})
+        sacts = set()
+        for sc in scripts:
+            u = sc if sc.startswith("http") else "https://www.tpex.org.tw" + sc
+            if u not in seen_scripts:
+                s2, sb, _, _ = getter(u, {})
+                seen_scripts[u] = _actions(sb.decode("utf-8", errors="replace")) if s2 == 200 else []
+                sleep(0.5)
+            sacts |= set(seen_scripts[u])
+        pages.append({"title": title, "url": href, "http_status": st, "actions": "|".join(_actions(page)),
+                      "page_scripts": "|".join(scripts), "script_actions": "|".join(sorted(sacts))})
         sleep(1.5)
-    pd.DataFrame(rows).to_csv(out / "discovery_requests.csv", index=False)
-    pd.DataFrame(pages).to_csv(out / "pages.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(pages, columns=PAGE_COLUMNS).to_csv(out / "pages.csv", index=False, encoding="utf-8-sig")
     return out
 
 
@@ -358,7 +388,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.discover_tpex:
         out = discover_tpex(Path(a.out_dir))
-        print(pd.read_csv(out / "pages.csv").to_string(index=False))
+        pg = pd.read_csv(out / "pages.csv")
+        print(f"menu items: {len(pd.read_csv(out / 'menu_items.csv'))}, matching pages: {len(pg)}")
+        print(pg[["title", "url", "actions", "script_actions"]].to_string(index=False) if len(pg) else "(no matching pages)")
         print(f"discovery written to {out}")
         return 0
     dates = [date.fromisoformat(x.strip()) for x in a.dates.split(",") if x.strip()]
