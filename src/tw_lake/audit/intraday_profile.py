@@ -31,6 +31,7 @@ import pandas as pd
 from ..clock import TAIPEI
 from ..config import load_config
 from ..paths import Layout
+from ..reference.official_volume import read_raw
 from ..run_context import git_sha
 from .reader import load_published
 from .runner import _guard_out_dir
@@ -100,7 +101,7 @@ def run_profile(cfg, probe_dir: Path, recon_dir: Path, out_root: Path, log=print
     parts = pv5.partitions.set_index("partition")
     off_rows, fub_rows, infos = [], [], []
     for r in rq.itertuples(index=False):
-        m, minfo = parse_mi5mins((Path(probe_dir) / r.raw_file).read_bytes())
+        m, minfo = parse_mi5mins(read_raw(Path(probe_dir) / r.raw_file))
         if m.empty:
             infos.append({"date": r.date, "parsed": False, **minfo})
             continue

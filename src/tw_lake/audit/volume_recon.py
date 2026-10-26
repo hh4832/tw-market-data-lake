@@ -66,7 +66,7 @@ def component_table(parsed: pd.DataFrame) -> pd.DataFrame:
         fields = list(dict.fromkeys(g["field"]))
         main[rep] = next((f for pref in ("成交股數", "成交張數", "成交數量", "成交量")
                           for f in fields if f.strip().startswith(pref)), fields[0])
-    p = p[p.apply(lambda r: r["field"] == main[r["report"]], axis=1)]
+    p = p[p["field"] == p["report"].map(main)]
     w = p.groupby(["symbol", "date", "report"])["shares"].sum().unstack("report")
     w.columns = [f"rep_{c}" for c in w.columns]
     out = w.reset_index()
@@ -121,24 +121,31 @@ def identity_tests(x: pd.DataFrame, ex: str, comps: list[str]) -> pd.DataFrame:
 
 def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int = 50, min_exact_pct: float = 99.0,
               parsed_file: Path | None = None, min_days_per_date: int = 30,
-              extra_probe_dirs: list[Path] | None = None, min_exact_pct_pattern: float = 60.0) -> Path:
+              extra_probe_dirs: list[Path] | None = None, min_exact_pct_pattern: float = 60.0,
+              comp: pd.DataFrame | None = None, reqs: pd.DataFrame | None = None,
+              unit_basis: pd.DataFrame | None = None) -> Path:
     started = datetime.now(TAIPEI)
     out = Path(out_root) / f"volume_recon_{started:%Y%m%d_%H%M%S}"
     out.mkdir(parents=True, exist_ok=False)
-    parsed = pd.read_parquet(Path(parsed_file) if parsed_file else Path(probe_dir) / "parsed_volume.parquet")
-    reqs = pd.read_parquet(Path(probe_dir) / "requests.parquet")
-    parsed = parsed.assign(_src=0)
-    for i, ep in enumerate(extra_probe_dirs or [], 1):     # e.g. a later probe of other endpoints, same dates
-        parsed = pd.concat([parsed, pd.read_parquet(Path(ep) / "parsed_volume.parquet").assign(_src=i)],
-                           ignore_index=True)
-        reqs = pd.concat([reqs, pd.read_parquet(Path(ep) / "requests.parquet")], ignore_index=True)
-    # a report-date fetched by several probes: keep the latest probe's rows (never de-duplicate trade rows)
-    last = parsed.groupby(["report", "date"])["_src"].transform("max")
-    parsed = parsed[parsed["_src"] == last].drop(columns="_src")
-    reqs = reqs.drop_duplicates(["report", "date"], keep="last")
+    if comp is None:
+        parsed = pd.read_parquet(Path(parsed_file) if parsed_file else Path(probe_dir) / "parsed_volume.parquet")
+        reqs = pd.read_parquet(Path(probe_dir) / "requests.parquet")
+        parsed = parsed.assign(_src=0)
+        for i, ep in enumerate(extra_probe_dirs or [], 1):     # e.g. a later probe of other endpoints, same dates
+            parsed = pd.concat([parsed, pd.read_parquet(Path(ep) / "parsed_volume.parquet").assign(_src=i)],
+                               ignore_index=True)
+            reqs = pd.concat([reqs, pd.read_parquet(Path(ep) / "requests.parquet")], ignore_index=True)
+        # a report-date fetched by several probes: keep the latest probe's rows (never de-duplicate trade rows)
+        last = parsed.groupby(["report", "date"])["_src"].transform("max")
+        parsed = parsed[parsed["_src"] == last].drop(columns="_src")
+        reqs = reqs.drop_duplicates(["report", "date"], keep="last")
+        comp = component_table(parsed)
+        unit_basis = parsed.groupby(["report", "multiplier_basis"]).size().rename("n").reset_index() \
+            if "multiplier_basis" in parsed.columns else None
+        dates = sorted(parsed["date"].unique())
+    else:                                              # batch: per-date component tables already built
+        dates = sorted(comp["date"].unique())
     components = {r.report: (r.exchange, r.component) for r in reqs.drop_duplicates("report").itertuples()}
-    comp = component_table(parsed)
-    dates = sorted(parsed["date"].unique())
     days = pd.read_parquet(Path(ledger_dir) / "gap_day_summary.parquet",
                            filters=[("date", "in", [pd.Timestamp(d) for d in dates])])
     days = days[days["expected_policy"] == "normal_template"].copy()
@@ -245,8 +252,8 @@ def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int =
     summ = {
         "recon_version": RECON_VERSION, "git_sha": git_sha(), "probe_dir": str(probe_dir), "ledger_dir": str(ledger_dir),
         "parsed_file": str(parsed_file) if parsed_file else "parsed_volume.parquet",
-        "unit_basis": parsed.groupby(["report", "multiplier_basis"]).size().rename("n").reset_index().to_dict("records")
-        if "multiplier_basis" in parsed.columns else None,
+        "unit_basis": unit_basis.groupby(["report", "multiplier_basis"])["n"].sum().reset_index().to_dict("records")
+        if unit_basis is not None else None,
         "dates": dates, "symbol_days_in_scope": int(len(x)), "exchange_counts": x["exchange"].value_counts().to_dict(),
         "identity": identity,
         "identity_by_date": by_date.to_dict("records"),
