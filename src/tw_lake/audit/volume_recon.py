@@ -49,6 +49,8 @@ def foreign_currency_etf(sym: pd.Series) -> pd.Series:
     s = sym.astype(str)
     return s.str.startswith("00") & (s.str.len() == 6) & s.str[5].isin(list("KMSC"))
 TOTAL_REPORTS = {"TWSE": ["MI_INDEX_ALLBUT0999"], "TPEX": ["dailyQuotes_EW", "old_daily_close_quotes"]}
+# reports that are alternatives of each other (subtract at most one of each group)
+EXCLUSIVE_GROUPS = [{"rep_BFIAUU_S", "rep_BFIAUU_ALL"}, {"rep_blockTrade_tradeInfo", "rep_blockTrade_quote"}]
 COUNT_WORDS = ("筆數", "Transaction")
 
 
@@ -85,7 +87,8 @@ def _total(x: pd.DataFrame, ex: str) -> pd.Series:
 
 def component_reports(x: pd.DataFrame, ex: str, components: dict) -> list[str]:
     tot = {f"rep_{r}" for r in TOTAL_REPORTS[ex]}
-    return [c for c in x.columns if c.startswith("rep_") and c not in tot and components.get(c[4:], ("", ""))[0] == ex]
+    return [c for c in x.columns if c.startswith("rep_") and c not in tot and components.get(c[4:], ("", ""))[0] == ex
+            and not str(components.get(c[4:], ("", ""))[1]).startswith("daily_total")]
 
 
 def identity_tests(x: pd.DataFrame, ex: str, comps: list[str]) -> pd.DataFrame:
@@ -95,8 +98,7 @@ def identity_tests(x: pd.DataFrame, ex: str, comps: list[str]) -> pd.DataFrame:
     # block variants are alternatives, not additive: use at most one report per component kind
     for k in range(len(comps) + 1):
         for S in itertools.combinations(comps, k):
-            kinds = [s.split("_")[1] if s.startswith("rep_BFIAUU") else s for s in S]
-            if len(set(kinds)) < len(kinds):
+            if any(len(set(S) & g) > 1 for g in EXCLUSIVE_GROUPS):
                 continue
             sub = c[list(S)].fillna(0).sum(axis=1) if S else 0.0
             res = c["official_total"] - sub - c["m_volume_shares"]
@@ -116,12 +118,22 @@ def identity_tests(x: pd.DataFrame, ex: str, comps: list[str]) -> pd.DataFrame:
 
 
 def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int = 50, min_exact_pct: float = 99.0,
-              parsed_file: Path | None = None, min_days_per_date: int = 30) -> Path:
+              parsed_file: Path | None = None, min_days_per_date: int = 30,
+              extra_probe_dirs: list[Path] | None = None) -> Path:
     started = datetime.now(TAIPEI)
     out = Path(out_root) / f"volume_recon_{started:%Y%m%d_%H%M%S}"
     out.mkdir(parents=True, exist_ok=False)
     parsed = pd.read_parquet(Path(parsed_file) if parsed_file else Path(probe_dir) / "parsed_volume.parquet")
     reqs = pd.read_parquet(Path(probe_dir) / "requests.parquet")
+    parsed = parsed.assign(_src=0)
+    for i, ep in enumerate(extra_probe_dirs or [], 1):     # e.g. a later probe of other endpoints, same dates
+        parsed = pd.concat([parsed, pd.read_parquet(Path(ep) / "parsed_volume.parquet").assign(_src=i)],
+                           ignore_index=True)
+        reqs = pd.concat([reqs, pd.read_parquet(Path(ep) / "requests.parquet")], ignore_index=True)
+    # a report-date fetched by several probes: keep the latest probe's rows (never de-duplicate trade rows)
+    last = parsed.groupby(["report", "date"])["_src"].transform("max")
+    parsed = parsed[parsed["_src"] == last].drop(columns="_src")
+    reqs = reqs.drop_duplicates(["report", "date"], keep="last")
     components = {r.report: (r.exchange, r.component) for r in reqs.drop_duplicates("report").itertuples()}
     comp = component_table(parsed)
     dates = sorted(parsed["date"].unique())
@@ -251,9 +263,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ledger-dir", required=True)
     p.add_argument("--out-dir", default="/content/tw_lake_volume_recon")
     p.add_argument("--parsed-file", default=None, help="e.g. <probe>/reparse_<ts>/parsed_volume.parquet")
+    p.add_argument("--extra-probe-dirs", default="", help="comma separated probe dirs merged in (other endpoints)")
     a = p.parse_args(argv)
     out = run_recon(Path(a.probe_dir), Path(a.ledger_dir), Path(a.out_dir),
-                    parsed_file=Path(a.parsed_file) if a.parsed_file else None)
+                    parsed_file=Path(a.parsed_file) if a.parsed_file else None,
+                    extra_probe_dirs=[Path(x) for x in a.extra_probe_dirs.split(",") if x.strip()])
     print((out / "volume_recon_summary.md").read_text(encoding="utf-8"))
     print(f"volume recon written to {out}")
     return 0

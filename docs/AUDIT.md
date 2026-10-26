@@ -289,3 +289,15 @@
   - 3 個為 `DAY_LEVEL_MISSING_VOLUME_EVIDENCED`，合計 958,000 股，無法定位到哪一根。
   - 仍是候選，帳本未改。
 - **櫃買中心**：每個日期都是 0% 精確，因為還沒有成分資料。網站地圖由 JS 從 `/data/menu/zh-tw/menu.json` 產生，`--discover-tpex` 已改為讀這個 menu。
+- **櫃買中心網站資料端點**（`/www/zh-tw/{ACTION}`，由 menu.json 頁面找到）：
+
+  | 報表 | ACTION |
+  |---|---|
+  | 每日收盤行情（不含定價） | `afterTrading/otc` |
+  | 盤後定價行情 | `afterTrading/fixPricing` |
+  | 盤中零股每日收盤行情 | `afterTrading/oddQuote` |
+  | 盤後零股每日收盤行情 | `afterTrading/odd` |
+  | 個股單一證券鉅額交易日成交資訊 | `blockTrade/tradeInfo` |
+  | 鉅額交易日成交資訊 | `blockTrade/quote` |
+
+  第四輪試抓沿用 dailyQuotes 的參數格式：`date=YYYY/MM/DD`、`type=EW`、`response=json`。
