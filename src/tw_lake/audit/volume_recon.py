@@ -18,7 +18,9 @@ Order of evidence (nothing is assumed):
        residual >= trading unit               -> DAY_LEVEL_MISSING_VOLUME_EVIDENCED (missing shares are
                                                  known for the day; WHICH slot is not -> slots stay UNRESOLVED)
        residual <= -1                          -> VOLUME_EXCESS_UNEXPLAINED
-   Otherwise ``UNRESOLVED_IDENTITY_NOT_VERIFIED``. F13 symbols (trading unit not verified) and
+   Otherwise ``UNRESOLVED_IDENTITY_NOT_VERIFIED``. The identity is also checked per exchange and date
+   (``identity_by_date``): only dates whose own complete days reconcile (>= 99% exact, >= 30 days) are
+   classified; a failing date is an anomaly to explain, not evidence about its missing bars. F13 symbols (trading unit not verified) and
    symbol-days with 5m volume > 5x daily are ``UNIT_UNVERIFIED_EXCLUDED``.
 All classes are candidates for review; the gap ledger is not modified.
 """
@@ -114,7 +116,7 @@ def identity_tests(x: pd.DataFrame, ex: str, comps: list[str]) -> pd.DataFrame:
 
 
 def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int = 50, min_exact_pct: float = 99.0,
-              parsed_file: Path | None = None) -> Path:
+              parsed_file: Path | None = None, min_days_per_date: int = 30) -> Path:
     started = datetime.now(TAIPEI)
     out = Path(out_root) / f"volume_recon_{started:%Y%m%d_%H%M%S}"
     out.mkdir(parents=True, exist_ok=False)
@@ -158,7 +160,21 @@ def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int =
         sub = x.loc[m, idn["subtract"]].fillna(0).sum(axis=1) if idn["subtract"] else 0.0
         x.loc[m, "official_regular"] = x.loc[m, "official_total"] - sub
     x["residual_shares"] = x["official_regular"] - x["m_volume_shares"].fillna(0)
-    verified = x["exchange"].map(lambda e: identity.get(e, {}).get("verified", False)).astype(bool)
+    # the identity is verified per exchange AND date: a date whose complete days do not reconcile is an
+    # anomaly to investigate, and its missing days are not classified (nothing is hidden: see identity_by_date)
+    cd = x[x["complete_day"] & ~x["unit_unverified"] & x["official_regular"].notna()]
+    by_date = cd.groupby(["exchange", "date"]).agg(
+        n_complete_days=("symbol", "size"),
+        exact_pct=("residual_shares", lambda r: round(100 * float((r.abs() < 1).mean()), 3)),
+        residual_lots_median_nonzero=("residual_shares", lambda r: float((r[r.abs() >= 1] / TRADING_UNIT).median())
+                                      if (r.abs() >= 1).any() else 0.0),
+        whole_lot_residual_pct=("residual_shares", lambda r: round(100 * float(((r % TRADING_UNIT) == 0)[r.abs() >= 1].mean()), 1)
+                                if (r.abs() >= 1).any() else None)).reset_index()
+    by_date["date_verified"] = (by_date["n_complete_days"] >= min_days_per_date) & (by_date["exact_pct"] >= min_exact_pct) \
+        & by_date["exchange"].map(lambda e: identity.get(e, {}).get("subtract") is not None)
+    by_date.to_csv(out / "identity_by_date.csv", index=False, encoding="utf-8-sig")
+    dv = set(zip(by_date.loc[by_date["date_verified"], "exchange"], by_date.loc[by_date["date_verified"], "date"]))
+    verified = pd.Series([(e, d) in dv for e, d in zip(x["exchange"], x["date"])], index=x.index)
     has_missing = x["missing_slots"] > 0
     x["volume_bound_class"] = np.select(
         [~has_missing, x["unit_unverified"], x["official_total"].isna(), ~verified,
@@ -199,6 +215,7 @@ def run_recon(probe_dir: Path, ledger_dir: Path, out_root: Path, min_days: int =
         if "multiplier_basis" in parsed.columns else None,
         "dates": dates, "symbol_days_in_scope": int(len(x)), "exchange_counts": x["exchange"].value_counts().to_dict(),
         "identity": identity,
+        "identity_by_date": by_date.to_dict("records"),
         "finlab_vs_official_on_complete_days": tt[tt["subtract"] == "FINLAB_vs_OFFICIAL_TOTAL"].to_dict("records"),
         "complete_days": {"n": int(len(comp_res)), "exact_pct": round(100 * float((comp_res["abs_res"] < 1).mean()), 3)
                           if len(comp_res) else None,
