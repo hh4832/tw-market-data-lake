@@ -249,27 +249,44 @@ def reparse(probe_dir: Path) -> Path:
     return out
 
 
-TPEX_DISCOVERY = ["https://www.tpex.org.tw/openapi/swagger.json", "https://www.tpex.org.tw/rsrc/js/main.js",
-                  "https://www.tpex.org.tw/rsrc/asset/js/global.js"]
+TPEX_DISCOVERY = ["https://www.tpex.org.tw/openapi/swagger.json", "https://www.tpex.org.tw/rsrc/js/main.js"]
+TPEX_SITEMAP = "https://www.tpex.org.tw/zh-tw/sitemap.html"
+TPEX_PAGE_KEYWORDS = ("盤後定價", "零股", "鉅額", "收盤行情", "定價")
+ACTION_RE = re.compile(r"""["'`]((?:[a-z][A-Za-z]*/)+[a-z][A-Za-z]*)["'`]""")
 
 
-def discover_tpex(out_dir: Path, getter=http_get) -> Path:
-    """Save TPEx OpenAPI spec and site scripts, and list every /www/zh-tw/... API path they mention."""
+def discover_tpex(out_dir: Path, getter=http_get, sleep=time.sleep, max_pages: int = 80) -> Path:
+    """Find the TPEx website JSON actions (API pattern /www/{LANG}/{ACTION}) for after-hours fixed price,
+    odd lot and block trades: read the sitemap, open the trading pages, list the action-like strings
+    each page script uses. The OpenAPI (latest day only, no date parameter) is saved for reference."""
     out = Path(out_dir) / f"tpex_discovery_{datetime.now(TAIPEI):%Y%m%d_%H%M%S}"
-    out.mkdir(parents=True)
-    found, rows = set(), []
+    (out / "pages").mkdir(parents=True)
+    rows = []
     for url in TPEX_DISCOVERY:
         status, body, ctype, final = getter(url, {})
-        name = url.rsplit("/", 1)[1]
-        (out / name).write_bytes(body)
-        text = body.decode("utf-8", errors="replace")
-        paths = set(re.findall(r"/www/(?:zh-tw|en-us)/[A-Za-z0-9_/\-]+", text)) | \
-            set(re.findall(r'"(/v1/[A-Za-z0-9_/\-]+)"', text))
-        found |= paths
-        rows.append({"url": url, "http_status": status, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(),
-                     "paths_found": len(paths)})
+        (out / url.rsplit("/", 1)[1]).write_bytes(body)
+        rows.append({"url": url, "http_status": status, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()})
+    status, body, _, _ = getter(TPEX_SITEMAP, {})
+    (out / "sitemap.html").write_bytes(body)
+    html = body.decode("utf-8", errors="replace")
+    links = []
+    for m in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, flags=re.S):
+        href, text = m.group(1), re.sub(r"<[^>]+>", "", m.group(2)).strip()
+        if "/zh-tw/" in href and href.endswith(".html") and any(k in text for k in TPEX_PAGE_KEYWORDS):
+            links.append((href if href.startswith("http") else "https://www.tpex.org.tw" + href, text))
+    pages = []
+    for href, text in list(dict.fromkeys(links))[:max_pages]:
+        st, b, _, _ = getter(href, {})
+        name = re.sub(r"[^A-Za-z0-9]+", "_", href.split("/zh-tw/")[-1])[:120]
+        (out / "pages" / name).write_bytes(b)
+        page = b.decode("utf-8", errors="replace")
+        acts = sorted({a for a in ACTION_RE.findall(page) if not a.startswith(("rsrc/", "css/", "js/", "zh-tw/", "en-us/"))})
+        scripts = sorted(set(re.findall(r'<script[^>]+src="([^"]+)"', page)))
+        pages.append({"title": text, "url": href, "http_status": st, "actions": "|".join(acts),
+                      "page_scripts": "|".join(s for s in scripts if "rsrc/asset" not in s)})
+        sleep(1.5)
     pd.DataFrame(rows).to_csv(out / "discovery_requests.csv", index=False)
-    (out / "api_paths.txt").write_text("\n".join(sorted(found)), encoding="utf-8")
+    pd.DataFrame(pages).to_csv(out / "pages.csv", index=False, encoding="utf-8-sig")
     return out
 
 
@@ -341,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.discover_tpex:
         out = discover_tpex(Path(a.out_dir))
-        print((out / "api_paths.txt").read_text(encoding="utf-8"))
+        print(pd.read_csv(out / "pages.csv").to_string(index=False))
         print(f"discovery written to {out}")
         return 0
     dates = [date.fromisoformat(x.strip()) for x in a.dates.split(",") if x.strip()]

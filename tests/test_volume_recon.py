@@ -130,3 +130,33 @@ def test_foreign_currency_etf_rule():
     from tw_lake.audit.volume_recon import foreign_currency_etf
     s = pd.Series(["00636K", "00687C", "0050", "00679B", "2330", "00757M"])
     assert foreign_currency_etf(s).tolist() == [True, True, False, False, False, True]
+
+
+def test_tpex_discovery_reads_sitemap_pages(tmp_path):
+    sitemap = ('<a href="/zh-tw/mainboard/trading/info/fixed.html">盤後定價交易</a>'
+               '<a href="/zh-tw/about/x.html">關於我們</a>').encode()
+    page = b'<script>const q = API_PATTERN.replace(/{ACTION}/, "afterTrading/fixedPriceQuotes");</script>'
+
+    def get(url, params):
+        body = sitemap if url.endswith("sitemap.html") else page if url.endswith("fixed.html") else b"{}"
+        return 200, body, "text/html", url
+    out = OV.discover_tpex(tmp_path, getter=get, sleep=lambda _s: None)
+    p = pd.read_csv(out / "pages.csv")
+    assert len(p) == 1 and p.iloc[0]["title"] == "盤後定價交易" and "afterTrading/fixedPriceQuotes" in p.iloc[0]["actions"]
+
+
+def test_identity_is_verified_per_date(tmp_path):
+    D2 = date(2025, 6, 24)
+    probe = OV.probe([D, D2], tmp_path / "probe", getter=fake_get, sleep=lambda _s: None, log=lambda *_a: None)
+    led = ledger(tmp_path)
+    d = pd.read_parquet(led / "gap_day_summary.parquet")
+    d2 = d.copy()
+    d2["date"] = pd.Timestamp(D2)
+    d2["m_volume_shares"] = d2["m_volume_shares"] - 5000          # D2: complete days do not reconcile
+    pd.concat([d, d2]).to_parquet(led / "gap_day_summary.parquet", index=False)
+    out = run_recon(probe, led, tmp_path / "recon")
+    bd = pd.read_csv(out / "identity_by_date.csv").set_index("date")
+    assert bd.loc["2025-06-23", "date_verified"] and not bd.loc["2025-06-24", "date_verified"]
+    r = pd.read_parquet(out / "volume_recon_symbol_day.parquet").set_index(["symbol", "date"])["volume_bound_class"]
+    assert r[("A", "2025-06-23")] == "CANDIDATE_NO_BOARD_LOT_TRADE_BY_VOLUME_BOUND"
+    assert r[("A", "2025-06-24")] == "UNRESOLVED_IDENTITY_NOT_VERIFIED"
