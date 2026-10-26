@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -100,6 +101,9 @@ ENDPOINTS: list[Endpoint] = [
              (("date", "{d8}"), ("response", "json")), 2.5),
     Endpoint("TPEX", "odd_roc_EW", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
              (("date", "{roc}"), ("type", "EW"), ("response", "json")), 2.5),
+    # parameters read from the page form (odd-lot/post-pricing/day.html): hidden type=Daily, date like dailyQuotes
+    Endpoint("TPEX", "odd_Daily", "odd_lot_after_hours", f"{TPEX}/afterTrading/odd",
+             (("date", "{dslash}"), ("type", "Daily"), ("response", "json")), 2.5),
     Endpoint("TPEX", "blockTrade_tradeInfo", "block", f"{TPEX}/blockTrade/tradeInfo",
              (("date", "{dslash}"), ("response", "json")), 2.5),
     Endpoint("TPEX", "blockTrade_quote", "block", f"{TPEX}/blockTrade/quote",
@@ -392,6 +396,30 @@ def discover_tpex(out_dir: Path, getter=http_get, sleep=time.sleep, max_pages: i
     return out
 
 
+def _fetch_one(ep: Endpoint, d: date, out: Path, getter, reqs: list, parsed: list, log) -> None:
+    params = {k: _fmt(v, d) for k, v in ep.params}
+    t0 = datetime.now(TAIPEI).isoformat(timespec="seconds")
+    status, body, ctype, final_url = getter(ep.url, params)
+    sha = hashlib.sha256(body).hexdigest()
+    rel = Path("raw") / ep.exchange / ep.report / f"{d.isoformat()}.json"
+    (out / rel).parent.mkdir(parents=True, exist_ok=True)
+    (out / rel).write_bytes(body)
+    df, info = parse_response(ep, d, body) if status == 200 else (pd.DataFrame(), {"json": False})
+    status_note = "soft_404_or_non_json" if status == 200 and not info.get("json") else ""
+    reqs.append({"exchange": ep.exchange, "report": ep.report, "component": ep.component, "date": d.isoformat(),
+                 "url": ep.url, "params": json.dumps(params, ensure_ascii=False), "final_url": final_url,
+                 "http_status": status, "content_type": ctype, "bytes": len(body), "sha256": sha,
+                 "raw_file": str(rel), "retrieved_at": t0, "known_at": known_at(d),
+                 "json": info.get("json"), "note": status_note, "stat": str(info.get("stat")),
+                 "tables": info.get("tables", 0), "tables_with_code": info.get("tables_with_code", 0),
+                 "parsed_rows": info.get("rows", 0), "share_fields": "|".join(info.get("share_fields", []))})
+    if len(df):
+        df["sha256"] = sha
+        parsed.append(df)
+    log(f"{ep.exchange} {ep.report} {d}: http={status} bytes={len(body)} rows={info.get('rows', 0)} "
+        f"fields={'|'.join(info.get('share_fields', []))[:120]}")
+
+
 def probe(dates: list[date], out_dir: Path, endpoints: list[Endpoint] | None = None, getter=http_get,
           sleep=time.sleep, log=print) -> Path:
     endpoints = endpoints or ENDPOINTS
@@ -399,33 +427,21 @@ def probe(dates: list[date], out_dir: Path, endpoints: list[Endpoint] | None = N
     out = Path(out_dir) / f"official_volume_probe_{started:%Y%m%d_%H%M%S}"
     out.mkdir(parents=True, exist_ok=False)
     reqs, parsed = [], []
+
+    def one_host(eps: list[Endpoint]) -> None:      # requests to one host stay sequential and paced
+        for ep in eps:
+            for d in dates:
+                _fetch_one(ep, d, out, getter, reqs, parsed, log)
+                sleep(ep.pace_sec)
+
+    hosts: dict[str, list[Endpoint]] = {}
     for ep in endpoints:
-        for d in dates:
-            params = {k: _fmt(v, d) for k, v in ep.params}
-            t0 = datetime.now(TAIPEI).isoformat(timespec="seconds")
-            status, body, ctype, final_url = getter(ep.url, params)
-            sha = hashlib.sha256(body).hexdigest()
-            rel = Path("raw") / ep.exchange / ep.report / f"{d.isoformat()}.json"
-            (out / rel).parent.mkdir(parents=True, exist_ok=True)
-            (out / rel).write_bytes(body)
-            df, info = parse_response(ep, d, body) if status == 200 else (pd.DataFrame(), {"json": False})
-            if status == 200 and not info.get("json"):
-                status_note = "soft_404_or_non_json"
-            else:
-                status_note = ""
-            reqs.append({"exchange": ep.exchange, "report": ep.report, "component": ep.component, "date": d.isoformat(),
-                         "url": ep.url, "params": json.dumps(params, ensure_ascii=False), "final_url": final_url,
-                         "http_status": status, "content_type": ctype, "bytes": len(body), "sha256": sha,
-                         "raw_file": str(rel), "retrieved_at": t0, "known_at": known_at(d),
-                         "json": info.get("json"), "note": status_note, "stat": str(info.get("stat")), "tables": info.get("tables", 0),
-                         "tables_with_code": info.get("tables_with_code", 0), "parsed_rows": info.get("rows", 0),
-                         "share_fields": "|".join(info.get("share_fields", []))})
-            if len(df):
-                df["sha256"] = sha
-                parsed.append(df)
-            log(f"{ep.exchange} {ep.report} {d}: http={status} bytes={len(body)} rows={info.get('rows', 0)} "
-                f"fields={'|'.join(info.get('share_fields', []))[:120]}")
-            sleep(ep.pace_sec)
+        hosts.setdefault(ep.exchange, []).append(ep)
+    # TWSE and TPEx are different servers with their own pacing: run them side by side (one thread per host)
+    with ThreadPoolExecutor(max_workers=max(1, len(hosts))) as pool:
+        for f in [pool.submit(one_host, eps) for eps in hosts.values()]:
+            f.result()
+    reqs.sort(key=lambda r: (r["exchange"], r["report"], r["date"]))
     rq = pd.DataFrame(reqs)
     rq.to_parquet(out / "requests.parquet", index=False)
     rq.to_csv(out / "requests.csv", index=False, encoding="utf-8-sig")

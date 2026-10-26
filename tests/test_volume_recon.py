@@ -186,3 +186,27 @@ def test_tpex_lots_field_and_multi_day_block_table():
     ep = [e for e in OV.ENDPOINTS if e.report == "blockTrade_tradeInfo"][0]
     df, info = OV.parse_response(ep, D, json.dumps(block, ensure_ascii=False).encode())   # D = 2025-06-23
     assert df[df["field"] == "成交股數"]["shares"].sum() == 700_000 and info["date_filtered"] == "2/3"
+
+
+def test_whole_lot_short_date_classes(tmp_path):
+    D2 = date(2025, 6, 24)
+    probe = OV.probe([D, D2], tmp_path / "probe", getter=fake_get, sleep=lambda _s: None, log=lambda *_a: None)
+    led = ledger(tmp_path)
+    d = pd.read_parquet(led / "gap_day_summary.parquet")
+    d2 = d.copy()
+    d2["date"] = pd.Timestamp(D2)
+    short = d2["symbol"].isin([f"{1100 + i}" for i in range(10)])     # 10 of ~60 complete days short by 2 lots
+    d2.loc[short, "m_volume_shares"] -= 2000
+    pd.concat([d, d2]).to_parquet(led / "gap_day_summary.parquet", index=False)
+    out = run_recon(probe, led, tmp_path / "recon")
+    bd = pd.read_csv(out / "identity_by_date.csv").set_index("date")
+    assert not bd.loc["2025-06-24", "date_verified"]
+    assert bd.loc["2025-06-24", "date_pattern"] == "whole_lot_short_only"
+    x = pd.read_parquet(out / "volume_recon_symbol_day.parquet").set_index(["symbol", "date"])
+    c = x["volume_bound_class"]
+    assert c[("A", "2025-06-24")] == "CANDIDATE_NO_TRADE_SYMBOL_EXACT_DATE_WHOLE_LOT_SHORT"
+    assert c[("B", "2025-06-24")] == "DAY_LEVEL_MISSING_VOLUME_ON_WHOLE_LOT_SHORT_DATE"
+    assert c[("E", "2025-06-24")] == "UNRESOLVED_IDENTITY_NOT_VERIFIED"      # 600 shares: not whole lots
+    assert c[("C", "2025-06-24")] == "UNRESOLVED_IDENTITY_NOT_VERIFIED"      # excess
+    assert x.loc[("1100", "2025-06-24"), "complete_day_whole_lot_short"]
+    assert not x.loc[("1100", "2025-06-23"), "complete_day_whole_lot_short"]
