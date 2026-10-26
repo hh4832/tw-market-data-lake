@@ -226,3 +226,24 @@
 - 判定：`logic_loss`（API 有、我們沒存，屬程式遺漏）、`value_mismatch`、`stored_not_in_api`、`consistent`。每個回應都存 JSON 並記 SHA-256。`consistent` 只表示富邦現在給的與已存的一致，不是無成交證據。
 
 **尚未解決**：歷史逐筆證據。富邦/Fugle 歷史端點只有 K 線，逐筆只有當日。要把 `UNRESOLVED` 升級成無成交證據，需要官方日量組成（一般盤、鉅額、盤後定價、零股）或交易所歷史逐筆資料。來源與取得方式待使用者決定。
+
+## 11. 官方成交量拆分試點（2026-10-26，使用者授權：只做最小可行試抓與對帳）
+
+使用者修正後的規格：
+- 上限推論 `daily_volume − stored_5m_volume < trading_unit` 可以接受，但必須先驗證統計口徑、交易單位與既存 K 棒成交量。
+- 429,531 個股票日只列為候選，不直接結案；驗證通過前，帳本維持 UNRESOLVED。
+
+- `tw_lake.reference.official_volume`：證交所／櫃買中心公開報表試抓。
+  - 抓取：每日收盤行情、盤後定價、盤中與盤後零股、鉅額。所有端點都是候選，抓不到也記錄為結果。
+  - 每個請求保存原始回應、URL、參數、HTTP 狀態、SHA-256、retrieved_at、known_at（交易日 20:00）。
+  - 只寫入自己的輸出資料夾。正式批次才會建立 versioned reference dataset，不改寫既有 raw、manifest、pointer。
+- `tw_lake.audit.volume_recon`：先在 K 棒全到齊的日子測試「官方總量 − 成分子集合 = 5 分K加總」。
+  - 精確（差 < 1 股）達 ≥ 99%、樣本 ≥ 50 天，才算 verified。另外檢查 FinLab 與官方總量的口徑差。
+  - 驗證通過的交易所，有缺棒的日子才分類：
+    - `CANDIDATE_NO_BOARD_LOT_TRADE_BY_VOLUME_BOUND`
+    - `DAY_LEVEL_MISSING_VOLUME_EVIDENCED`：知道當日少了多少股，但不知道是哪一根，格點仍為 UNRESOLVED
+    - `VOLUME_EXCESS_UNEXPLAINED`
+    - `UNIT_UNVERIFIED_EXCLUDED`：F13 及 5 分K量大於日量 5 倍者
+    - `UNRESOLVED_*`
+  - 分開統計：已解釋的缺棒股票日數、已解釋的缺棒根數（只計候選無成交）、無法定位到分鐘的缺失股數。
+  - 輸出：完整日殘差前 200 名、高流動缺棒日、富邦整日缺漏 4 天的明細。
