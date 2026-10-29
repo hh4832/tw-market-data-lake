@@ -1,0 +1,55 @@
+{
+  "contract": "tw-market-data-lake 5m backtest data contract",
+  "version": "1.0.0-draft",
+  "status": "pending_review",
+  "mask_file": "quality_mask_symbol_day.parquet",
+  "key": ["symbol", "date"],
+  "unknown_is_true": false,
+  "tiers": {
+    "LEVEL_A_STRICT": {"column": "level_A_strict", "use": "robustness_control"},
+    "LEVEL_B_PRICE_GATE": {"column": "level_B_price_gate", "use": "primary_price_research"},
+    "VOLUME_STRICT": {"column": "volume_strict", "use": "intraday_volume_research"},
+    "EXPLORATORY_ONLY": {"column": "research_tier", "value": "EXPLORATORY_ONLY", "use": "exploration_only"},
+    "ISOLATE": {"column": "research_tier", "value": "ISOLATE", "use": "exclude_or_model_separately"}
+  },
+  "columns": {
+    "gap_evidence_status": ["NONE_MISSING", "NO_BARS", "VERIFIED_CANDIDATE_ACCEPTED_FOR_RESEARCH",
+                            "CANDIDATE_NO_BOARD_LOT_TRADE", "DAY_LEVEL_MISSING_VOLUME",
+                            "UNRESOLVED_QUARANTINED_EXCHANGE_DATE", "UNRESOLVED_ANOMALY", "UNRESOLVED_VOLUME_EXCESS",
+                            "UNRESOLVED_NO_OFFICIAL_RECORD", "UNIT_UNVERIFIED_EXCLUDED", "SPECIAL_SESSION_NOT_EVALUATED"],
+    "price_range_match": ["TRUE", "FALSE", "UNKNOWN"],
+    "open_match": ["TRUE", "FALSE", "UNKNOWN"],
+    "close_match": ["TRUE", "FALSE", "UNKNOWN"],
+    "price_quality_status": ["PASS", "RANGE_ONLY", "FAIL_RANGE", "UNKNOWN"],
+    "volume_reconciliation_status": ["EXACT", "WITHIN_ONE_LOT", "SHORTFALL_WHOLE_LOTS", "OVERCOUNT",
+                                     "RESIDUAL_NOT_WHOLE_LOT", "IDENTITY_UNVERIFIED", "QUARANTINED_DATE",
+                                     "NOT_EVALUATED"],
+    "intraday_volume_shortfall_ratio": "float: (official regular - stored 5m) / official regular when short by whole lots; 0 when EXACT/WITHIN_ONE_LOT; NaN unknown",
+    "intraday_volume_overcount": "float shares: stored 5m - official regular when positive; 0 otherwise; NaN unknown",
+    "session_type": ["normal_template", "special_auction_or_halt", "regime_unknown"],
+    "has_special_auction": "bool",
+    "can_use_for_price_backtest": "bool",
+    "can_use_for_volume_backtest": "bool",
+    "exclusion_reason": "first failing rule for the price backtest; empty when usable",
+    "evidence_version": "string",
+    "source_manifest_sequence": "fubon_5m published seq"
+  },
+  "slot_types": {
+    "REAL_BAR": {"executable": true, "indicator_input": true},
+    "NO_TRADE_INTERVAL_EVIDENCED": {"executable": false, "indicator_input": "volume=0; price only as flagged derived value"},
+    "NO_TRADE_INTERVAL_CANDIDATE": {"executable": false, "indicator_input": "exploratory only"},
+    "SOURCE_MISSING_INTERVAL": {"executable": false, "indicator_input": false},
+    "RESEARCH_DERIVED_PRICE": {"executable": false, "indicator_input": "flagged derived field only"},
+    "EXECUTABLE_SLOT": {"definition": "REAL_BAR with volume > 0 on a can_use_for_price_backtest symbol-day"}
+  },
+  "timing": {
+    "bar_available_at": "bar_start + 5 minutes; 13:30 closing-call bar after the 13:30 match",
+    "resampled_bar_available_at": "end of the last constituent 5m bar",
+    "mask_known_at": "trade date 20:00 Asia/Taipei",
+    "universe_selection_may_use": ["prev_official_total_shares", "masks of prev_trading_date or earlier"],
+    "same_day_mask_use": "data-availability exclusion only; report excluded trades",
+    "fill": "next EXECUTABLE_SLOT open + slippage + fees + tax; never the signal bar's own close"
+  },
+  "forward_fill_as_trade": false,
+  "official_open_close_override": "when open_match/close_match is FALSE use the official daily open/close"
+}

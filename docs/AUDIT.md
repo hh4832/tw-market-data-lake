@@ -401,3 +401,20 @@
   - 5 分 K 分區以多執行緒讀取，每 200 個分區寫一個 chunk，可以用 `--resume-dir` 續跑。
   - Eligibility 加上 `--price-check-dir` 後會帶入 `price_reliable`，並新增 `eligible_level_A_price_verified` 欄位。
 - 每次執行都會寫 `run_info.json`，內容包括 git SHA、套件版本、參數、輸入檔、各階段的 START／DONE／FAIL 狀態與耗時。
+
+## 15. 最終資料品質驗收（`tw_lake.audit.quality_mask`）
+
+輸入都是先前的不可變輸出：缺棒帳本、帶入價格比對的 Eligibility、價格比對、BFT41U 重抓證據、B 類診斷與富邦交叉比對。輸出寫到新的版本化資料夾，附 SHA-256，不改寫任何既有資料。
+
+- **規則 v2 的接受條件**：符合以下全部條件的缺棒股票日，標為 `VERIFIED_CANDIDATE_ACCEPTED_FOR_RESEARCH`：
+  1. 正常盤
+  2. 單位已核實
+  3. 有官方紀錄
+  4. 交易所日期為 `VERIFIED` 或 `NO_OVERCOUNT`，且不在隔離清單
+  5. 殘差剛好為 0
+  6. 官方最高價、最低價與 K 棒一致
+
+  不符合的維持 `CANDIDATE` 或 `UNRESOLVED`。這是個股日層級的推論，不是逐根觀察。各前提與證據列在 `acceptance_rule_v2.json`。
+- **隔離**：完整日有負殘差的交易所日期整天隔離。同日其他股票（包括 K 棒完整的）不會升級為可信。
+- **BFT41U 完整度修正**：列數偏低的報表，若獨立重抓結果 HTTP 200、股票數相同、數值 0 差異，即改判為完整，並記錄在 `reference_completeness_cleared.csv`。
+- **欄位、層級與防前視規則**：見 `docs/BACKTEST_DATA_CONTRACT.md`。
