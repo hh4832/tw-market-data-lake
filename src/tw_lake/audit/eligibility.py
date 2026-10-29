@@ -73,8 +73,12 @@ def load_inputs(ledger_dir: Path, recon_dir: Path) -> dict:
     return {"days": days, "recon": recon, "summary": summ, "by_date": by_date, "ledger_summary": lsum}
 
 
-def shard_inventory(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """requests of every shard (+ shard path and completeness) and the official totals of every symbol."""
+def shard_inventory(root: Path, symbols: set[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """requests of every shard (+ shard path and completeness) and the official daily totals. Only the total
+    columns are kept, and only for `symbols` when given (warrants etc. would otherwise exhaust memory)."""
+    keep = ["symbol", "date"] + [f"rep_{r}" for ex in TOTAL_REPORTS.values() for r in ex]
+    req_cols = ["exchange", "report", "component", "date", "http_status", "sha256", "raw_file", "retrieved_at",
+                "known_at", "json", "parsed_rows"]
     from concurrent.futures import ThreadPoolExecutor
 
     from .stagelog import progress
@@ -84,9 +88,13 @@ def shard_inventory(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
         complete = all((sd / f).exists() for f in ("_SUCCESS", "requests.parquet", "components.parquet"))
         r = c = None
         if (sd / "requests.parquet").exists():
-            r = pd.read_parquet(sd / "requests.parquet").assign(shard=str(sd), shard_complete=complete)
+            r = pd.read_parquet(sd / "requests.parquet")
+            r = r[[x for x in req_cols if x in r.columns]].assign(shard=str(sd), shard_complete=complete)
         if complete:
             c = pd.read_parquet(sd / "components.parquet")
+            c = c[[x for x in keep if x in c.columns]]
+            if symbols is not None:
+                c = c[c["symbol"].isin(symbols)]
         return sd, complete, r, c
     reqs, comps, shards = [], [], {}
     with ThreadPoolExecutor(max_workers=16) as pool:
@@ -466,7 +474,7 @@ def run(ledger_dir: Path, recon_dir: Path, dataset_root: Path, out_root: Path, d
     out.mkdir(parents=True)
     log("phase 1: loading inputs")
     inp = load_inputs(ledger_dir, recon_dir)
-    rq, comp, shards = shard_inventory(dataset_root)
+    rq, comp, shards = shard_inventory(dataset_root, set(inp["days"]["symbol"].unique()))
     p1 = reproduce(inp, rq, shards)
     seq = None
     if data_root:
@@ -496,6 +504,7 @@ def run(ledger_dir: Path, recon_dir: Path, dataset_root: Path, out_root: Path, d
     x = classify_v2(inp["recon"], q)
     log("phase 3: products")
     totals = official_totals(comp)
+    del comp
     s = symbol_day_quality(inp["days"], x, totals, q)
     if price_check_dir:            # official daily OHLC vs stored 5m (tw_lake.audit.price_check)
         pc = pd.read_parquet(Path(price_check_dir) / "price_check_symbol_day.parquet",
@@ -503,6 +512,21 @@ def run(ledger_dir: Path, recon_dir: Path, dataset_root: Path, out_root: Path, d
         s = s.drop(columns="price_reliable").merge(pc, on=["symbol", "date"], how="left")
         s["price_reliable"] = s["price_reliable"].fillna("UNKNOWN")
         s["eligible_level_A_price_verified"] = s["eligible_level_A"] & (s["price_reliable"] == "TRUE")
+        s["price_mismatch"] = s["price_mismatch"].fillna("")
+        # does a price contradiction land on a missing-bar no-trade candidate? (would falsify rule v2 there)
+        xt = pd.crosstab(s["missing_bar_evidence_status"], s["price_reliable"])
+        xt.to_csv(out / "price_vs_missing_bar_class.csv", encoding="utf-8-sig")
+        lv = inp["days"][["symbol", "date", "missing_first_slot", "missing_close_auction", "missing_continuous",
+                          "longest_run"]] if {"missing_first_slot", "missing_close_auction"} <= set(inp["days"].columns) \
+            else inp["days"][["symbol", "date"]]
+        bad = s[(s["price_reliable"] == "FALSE")].merge(lv, on=["symbol", "date"], how="left")
+        bad.to_csv(out / "price_false_symbol_days.csv", index=False, encoding="utf-8-sig")
+        if "missing_first_slot" in bad.columns:
+            pd.crosstab([bad["missing_bar_evidence_status"], bad["price_mismatch"]],
+                        [bad["missing_first_slot"].fillna(-1).astype(int) > 0,
+                         bad["missing_close_auction"].fillna(-1).astype(int) > 0]) \
+                .to_csv(out / "price_false_by_class_and_missing_edge.csv", encoding="utf-8-sig")
+        log("price x missing-bar class:\n" + xt.to_string())
     q.to_parquet(out / "exchange_date_quality.parquet", index=False)
     s.to_parquet(out / "symbol_day_quality.parquet", index=False)
     cov.to_csv(out / "reference_coverage.csv", index=False, encoding="utf-8-sig")
