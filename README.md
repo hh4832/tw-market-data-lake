@@ -84,6 +84,15 @@ cov = s5.tables()["coverage_by_window"]
 只讀 manifest 指向的已發布版本，不呼叫 API、不寫 DATA_ROOT（`--publish-to-drive` 時才把結果複製到新的
 `_tw-market-data-lake/audits/<audit_id>/`）。規格、2026-10-25 實測發現與 Phase B 提案見 [docs/AUDIT.md](docs/AUDIT.md)。
 
+後續稽核與參考資料都是唯讀，或只寫入自己的新資料夾。各 notebook 用途如下：
+
+| Notebook | 模組 | 用途 |
+|---|---|---|
+| `TW_Market_Data_Lake_Gap_Ledger.ipynb` | `tw_lake.audit.gap_ledger` | 逐格缺棒帳本 |
+| `TW_Market_Data_Lake_Official_Volume_Batch.ipynb` | `tw_lake.reference.official_volume_batch` | 官方成交量參考資料（可分段抓取）與全期對帳 |
+| `TW_Market_Data_Lake_Eligibility.ipynb` | `tw_lake.audit.eligibility` | 規則 v2 複核、Backtest Eligibility（Level A／B） |
+| `TW_Market_Data_Lake_Targeted_Checks.ipynb` | `tw_lake.audit.targeted_checks`、`tw_lake.audit.price_check` | 小量補抓、B 類日期診斷、官方日 K 價格比對 |
+
 ## 開發
 
 ```bash
