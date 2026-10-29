@@ -383,3 +383,21 @@
 - **其他欄位與限制**
   - `price_reliable` 在 v0.1 一律為 `UNKNOWN`，因為尚未與官方價格比對。
   - 資格欄位用到當天的對帳結果（當天 20:00 後才知道），只能當資料可用性遮罩，不能直接當可交易標的池。標的池篩選請用 `prev_official_total_shares`。
+
+## 14. 小量補抓與官方價格比對（`tw_lake.audit.targeted_checks`、`tw_lake.audit.price_check`）
+
+- **`overcount`（離線）**：處理 13 個 B 類交易所日期上，完整日殘差 ≤ −1 股的股票日。每一筆列出以下項目，只做診斷，不改分類：
+  - 多出的股數，以及是否為整張
+  - 多出的量是否剛好等於某個成分（盤後定價、零股、鉅額）
+  - 同一檔股票前後交易日是否有反向殘差（量歸錯日）
+  - 13:30 之後的 K 棒數，以及 13:30 那根 K 棒的量
+  - FinLab 日量與官方總量的差
+- **`official`**：只重抓 `refetch_minimal.csv` 列出的報表與日期，存到新的證據資料夾（gzip 原始回應、SHA-256、retrieved_at、known_at），再與既有 shard 比較 bytes、列數、股票數和數值。既有 shard 是不可變的，不會修改；回應有差異時只報告，不合併。
+- **`fubon`**（需明確啟用、有上限）：用富邦歷史 K 線行情（日K、5 分K、1 分K）重抓 B 類股票日，沿用 `provider_crosscheck`。不使用任何交易或帳務 API。
+- **`price_check`（離線）**：
+  - 官方開、高、低、收來自已存的 MI_INDEX（ALLBUT0999）與 dailyQuotes（EW）原始回應，都是未調整價格。
+  - 5 分 K 彙總方式：開盤取第一根 K 棒的開盤價，最高、最低取全部 K 棒的極值，收盤取最後一根 K 棒的收盤價。
+  - 比對結果：四個價格全部相等為 `TRUE`，任一不相等為 `FALSE`（並列出是哪幾個欄位），沒有官方價或沒有 K 棒為 `UNKNOWN`。
+  - 5 分 K 分區以多執行緒讀取，每 200 個分區寫一個 chunk，可以用 `--resume-dir` 續跑。
+  - Eligibility 加上 `--price-check-dir` 後會帶入 `price_reliable`，並新增 `eligible_level_A_price_verified` 欄位。
+- 每次執行都會寫 `run_info.json`，內容包括 git SHA、套件版本、參數、輸入檔、各階段的 START／DONE／FAIL 狀態與耗時。

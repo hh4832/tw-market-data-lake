@@ -75,18 +75,27 @@ def load_inputs(ledger_dir: Path, recon_dir: Path) -> dict:
 
 def shard_inventory(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """requests of every shard (+ shard path and completeness) and the official totals of every symbol."""
-    reqs, comps, shards = [], [], {}
-    for sd in sorted((Path(root) / "shards").glob("year=*/date=*")):
-        d = sd.name.split("=", 1)[1]
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .stagelog import progress
+    dirs = sorted((Path(root) / "shards").glob("year=*/date=*"))
+
+    def one(sd: Path):           # Drive FUSE is latency bound: read shards in parallel threads
         complete = all((sd / f).exists() for f in ("_SUCCESS", "requests.parquet", "components.parquet"))
-        shards[d] = {"path": str(sd), "complete": complete}
+        r = c = None
         if (sd / "requests.parquet").exists():
-            r = pd.read_parquet(sd / "requests.parquet")
-            r["shard"] = str(sd)
-            r["shard_complete"] = complete
-            reqs.append(r)
+            r = pd.read_parquet(sd / "requests.parquet").assign(shard=str(sd), shard_complete=complete)
         if complete:
-            comps.append(pd.read_parquet(sd / "components.parquet"))
+            c = pd.read_parquet(sd / "components.parquet")
+        return sd, complete, r, c
+    reqs, comps, shards = [], [], {}
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        for sd, complete, r, c in progress(pool.map(one, dirs), "reference shards", total=len(dirs)):
+            shards[sd.name.split("=", 1)[1]] = {"path": str(sd), "complete": complete}
+            if r is not None:
+                reqs.append(r)
+            if c is not None:
+                comps.append(c)
     rq = pd.concat(reqs, ignore_index=True) if reqs else pd.DataFrame()
     comp = pd.concat(comps, ignore_index=True) if comps else pd.DataFrame(columns=["symbol", "date"])
     return rq, comp, shards
@@ -174,15 +183,15 @@ def verify_raw(rq: pd.DataFrame, dates: set[str], sample_frac: float = 0.05, see
     rest = rq[~rq["date"].isin(dates)]
     if len(rest) and sample_frac > 0:
         pick = pd.concat([pick, rest.sample(frac=min(1.0, sample_frac), random_state=seed)])
-    out = []
-    for r in pick.itertuples(index=False):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(r):
         p = Path(r.shard) / r.raw_file
-        if not p.exists():
-            out.append({"exchange": r.exchange, "date": r.date, "report": r.report, "raw_exists": False,
-                        "sha_ok": False})
-            continue
-        out.append({"exchange": r.exchange, "date": r.date, "report": r.report, "raw_exists": True,
-                    "sha_ok": hashlib.sha256(read_raw(p)).hexdigest() == r.sha256})
+        ok = p.exists()
+        return {"exchange": r.exchange, "date": r.date, "report": r.report, "raw_exists": ok,
+                "sha_ok": ok and hashlib.sha256(read_raw(p)).hexdigest() == r.sha256}
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        out = list(pool.map(one, pick.itertuples(index=False)))
     return pd.DataFrame(out, columns=["exchange", "date", "report", "raw_exists", "sha_ok"])
 
 
@@ -446,7 +455,7 @@ def _sha(p: Path) -> str:
 
 
 def run(ledger_dir: Path, recon_dir: Path, dataset_root: Path, out_root: Path, data_root: Path | None = None,
-        sample_frac: float = 0.05, log=print) -> Path:
+        sample_frac: float = 0.05, log=print, price_check_dir: Path | None = None) -> Path:
     checked_at = datetime.now(TAIPEI).isoformat(timespec="seconds")
     out = Path(out_root) / f"eligibility_{datetime.now(TAIPEI):%Y%m%d_%H%M%S}_{git_sha()[:7]}"
     if data_root:
@@ -488,6 +497,12 @@ def run(ledger_dir: Path, recon_dir: Path, dataset_root: Path, out_root: Path, d
     log("phase 3: products")
     totals = official_totals(comp)
     s = symbol_day_quality(inp["days"], x, totals, q)
+    if price_check_dir:            # official daily OHLC vs stored 5m (tw_lake.audit.price_check)
+        pc = pd.read_parquet(Path(price_check_dir) / "price_check_symbol_day.parquet",
+                             columns=["symbol", "date", "price_reliable", "price_mismatch"])
+        s = s.drop(columns="price_reliable").merge(pc, on=["symbol", "date"], how="left")
+        s["price_reliable"] = s["price_reliable"].fillna("UNKNOWN")
+        s["eligible_level_A_price_verified"] = s["eligible_level_A"] & (s["price_reliable"] == "TRUE")
     q.to_parquet(out / "exchange_date_quality.parquet", index=False)
     s.to_parquet(out / "symbol_day_quality.parquet", index=False)
     cov.to_csv(out / "reference_coverage.csv", index=False, encoding="utf-8-sig")
@@ -573,7 +588,8 @@ def run(ledger_dir: Path, recon_dir: Path, dataset_root: Path, out_root: Path, d
             "rule_v2": "0 <= official regular - stored 5m < 1,000 shares on an exchange-date without negative residuals",
             "pit_note": "eligibility masks use same-day reconciliation (known after 20:00); they are data-availability "
                         "masks, not a tradable universe. Universe filters must use prev_official_total_shares.",
-            "price_reliable": "UNKNOWN for all rows in v0.1 (no official price comparison yet)",
+            "price_reliable": (f"official daily OHLC vs stored 5m from {price_check_dir}" if price_check_dir
+                               else "UNKNOWN for all rows (no official price comparison supplied)"),
             "no_forward_fill": True},
         "assumption_checks": {"negative_residual_rate_complete_days": round(neg_rate, 6)},
         "row_counts": {"exchange_date_quality": int(len(q)), "symbol_day_quality": int(len(s)),
@@ -604,9 +620,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dataset-root", required=True)
     p.add_argument("--out-dir", default="/content/tw_lake_eligibility")
     p.add_argument("--raw-sample-frac", type=float, default=0.05)
+    p.add_argument("--price-check-dir", default=None)
     a = p.parse_args(argv)
     out = run(Path(a.ledger_dir), Path(a.recon_dir), Path(a.dataset_root), Path(a.out_dir),
-              Path(a.data_root) if a.data_root else None, a.raw_sample_frac)
+              Path(a.data_root) if a.data_root else None, a.raw_sample_frac,
+              price_check_dir=Path(a.price_check_dir) if a.price_check_dir else None)
     if (out / "REPORT.md").exists():
         print((out / "REPORT.md").read_text(encoding="utf-8"))
     else:

@@ -85,15 +85,17 @@ def verdict(off: float, stored: float, a5: float | None, a1: float | None, aD: f
 
 
 def run_crosscheck(cfg, recon_dir: Path, out_root: Path, client, per_date: int = 20, control_per_date: int = 5,
-                   seed: int = 20261026, sleep=time.sleep, log=print) -> Path:
+                   seed: int = 20261026, sleep=time.sleep, log=print, sample: pd.DataFrame | None = None,
+                   prefix: str = "provider_crosscheck") -> Path:
     layout = Layout.from_config(cfg)
     started = datetime.now(TAIPEI)
-    out = Path(out_root) / f"provider_crosscheck_{started:%Y%m%d_%H%M%S}_{git_sha()[:7]}"
+    out = Path(out_root) / f"{prefix}_{started:%Y%m%d_%H%M%S}_{git_sha()[:7]}"
     _guard_out_dir(layout, out)
     (out / "responses").mkdir(parents=True)
-    recon = pd.read_parquet(Path(recon_dir) / "volume_recon_symbol_day.parquet")
-    by_date = pd.read_csv(Path(recon_dir) / "identity_by_date.csv")
-    sample = draw(recon, by_date, per_date, control_per_date, seed)
+    if sample is None:              # explicit symbol-day list (targeted checks) or the stratified draw
+        recon = pd.read_parquet(Path(recon_dir) / "volume_recon_symbol_day.parquet")
+        by_date = pd.read_csv(Path(recon_dir) / "identity_by_date.csv")
+        sample = draw(recon, by_date, per_date, control_per_date, seed)
     pv5 = load_published("fubon_5m", layout.dataset_dirs["fubon_5m"])
     parts = pv5.partitions.set_index("partition")
     f = cfg.fubon
