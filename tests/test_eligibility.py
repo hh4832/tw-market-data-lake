@@ -76,3 +76,19 @@ def test_reproduce_mismatch_stops(tmp_path):
     out = E.run(led, recon, root, tmp_path / "elig", log=noop)
     assert not (out / "symbol_day_quality.parquet").exists()
     assert json.loads((out / "phase1_reproduce.json").read_text(encoding="utf-8"))["ok"] is False
+
+
+def test_price_merge_and_crosstab(tmp_path):
+    led, root, recon = build(tmp_path)
+    pc = tmp_path / "pc"
+    pc.mkdir()
+    pd.DataFrame([{"symbol": "A", "date": "2025-06-24", "price_reliable": "FALSE", "price_mismatch": "open"},
+                  {"symbol": "1105", "date": "2025-06-25", "price_reliable": "TRUE", "price_mismatch": ""}]) \
+        .to_parquet(pc / "price_check_symbol_day.parquet", index=False)
+    out = E.run(led, recon, root, tmp_path / "elig", log=noop, price_check_dir=pc)
+    s = pd.read_parquet(out / "symbol_day_quality.parquet").set_index(["symbol", "date"])
+    assert s.loc[("1105", "2025-06-25"), "eligible_level_A_price_verified"]
+    assert s.loc[("B", "2025-06-24"), "price_reliable"] == "UNKNOWN"
+    xt = pd.read_csv(out / "price_vs_missing_bar_class.csv", index_col=0)
+    assert xt.loc[E.NO_TRADE, "FALSE"] == 1
+    assert len(pd.read_csv(out / "price_false_symbol_days.csv")) == 1
