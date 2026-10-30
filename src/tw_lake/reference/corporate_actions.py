@@ -48,7 +48,7 @@ from ..clock import TAIPEI
 from ..run_context import git_sha
 from . import official_volume as OV
 
-CA_VERSION = "0.1.0"
+CA_VERSION = "0.2.0"
 TWSE = "https://www.twse.com.tw/rwd/zh"
 TWSE_WWW = "https://www.twse.com.tw"
 TPEX = "https://www.tpex.org.tw/www/zh-tw"
@@ -65,19 +65,27 @@ class Endpoint:
     kind: str             # what we EXPECT it to contain; verified by probe, never assumed
     url: str
     params: tuple         # ((key, template), ...): {s8} {e8} YYYYMMDD, {sslash} {eslash} YYYY/MM/DD, {sroc} {eroc} ROC
-    mode: str             # "range" (start/end window, fetched per month) | "snapshot" (current list, no history)
+    mode: str             # "range" (window, fetched per month) | "year" (one request per year) |
+    #                       "day" (one request per weekday) | "snapshot" (current list, no history)
     fmt: str = "json"     # json | html
     pace_sec: float = 4.0
+    timeout: float | None = None   # seconds; None = http_get default
 
 
 def _rng(t: str, s: date, e: date) -> str:
     return t.format(s8=s.strftime("%Y%m%d"), e8=e.strftime("%Y%m%d"), sslash=s.strftime("%Y/%m/%d"),
                     eslash=e.strftime("%Y/%m/%d"), sroc=f"{s.year - 1911}/{s:%m}/{s:%d}",
-                    eroc=f"{e.year - 1911}/{e:%m}/{e:%d}")
+                    eroc=f"{e.year - 1911}/{e:%m}/{e:%d}", y=str(s.year), yroc=str(s.year - 1911))
 
 
 R = (("startDate", "{s8}"), ("endDate", "{e8}"), ("response", "json"))
 RT = (("startDate", "{sslash}"), ("endDate", "{eslash}"), ("response", "json"))
+# Probe 2026-10-30 (ca_probe_20261030_215933) + discover (ca_discovery_20261030_215635):
+#   TWSE rwd endpoints below answered with tables; TWT48U and TWTAVU ignore the date window (current lists only);
+#   TPEx new-site actions and their form fields were read from the saved TPEx pages (startDate/endDate in
+#   YYYY/MM/DD for bulletin/*Rslt|revivt|exDailyQ; company/deListed and company/latest take date=<year>,
+#   reason=-1; afterTrading/chtm takes one date). Entries marked "unverified" have not answered yet.
+D = (("date", "{sslash}"), ("response", "json"))
 CANDIDATES: list[Endpoint] = [
     # --- TWSE corporate actions (B3)
     Endpoint("TWSE_TWT49U", "TWSE", "ex_right_dividend_result", f"{TWSE}/exRight/TWT49U", R, "range"),
@@ -86,8 +94,10 @@ CANDIDATES: list[Endpoint] = [
              (("response", "json"),), "snapshot"),
     Endpoint("TWSE_TWTAUU", "TWSE", "capital_reduction_resume_ref_price", f"{TWSE}/reducation/TWTAUU", R, "range"),
     Endpoint("TWSE_TWTAUU_b", "TWSE", "capital_reduction_resume_ref_price", f"{TWSE}/reduction/TWTAUU", R, "range"),
-    Endpoint("TWSE_TWTAVU", "TWSE", "capital_reduction_detail", f"{TWSE}/reducation/TWTAVU", R, "range"),
-    Endpoint("TWSE_TWTCAU", "TWSE", "etf_split_or_par_change", f"{TWSE}/split/TWTCAU", R, "range"),
+    Endpoint("TWSE_TWTAVU", "TWSE", "capital_reduction_preannounce", f"{TWSE}/reducation/TWTAVU", R, "range"),
+    Endpoint("TWSE_TWTAVU_now", "TWSE", "capital_reduction_preannounce", f"{TWSE}/reducation/TWTAVU",
+             (("response", "json"),), "snapshot"),
+    Endpoint("TWSE_TWTCAU", "TWSE", "etf_split_resume_ref_price", f"{TWSE}/split/TWTCAU", R, "range"),
     Endpoint("TWSE_TWTB8U", "TWSE", "par_value_change_resume_ref_price", f"{TWSE}/change/TWTB8U", R, "range"),
     # --- TWSE trading status / listing (B4, B5)
     Endpoint("TWSE_TWTAWU", "TWSE", "suspended_trading", f"{TWSE}/afterTrading/TWTAWU", R, "range"),
@@ -95,7 +105,33 @@ CANDIDATES: list[Endpoint] = [
              (("response", "json"),), "snapshot"),
     Endpoint("TWSE_newlisting", "TWSE", "new_listings", f"{TWSE}/company/newlisting",
              (("response", "json"),), "snapshot"),
-    # --- TPEx (new site actions are guesses until discover confirms them)
+    # --- TPEx new site (actions and form fields from the saved pages)
+    Endpoint("TPEX_exDailyQ_b", "TPEX", "ex_right_dividend_result", f"{TPEX}/bulletin/exDailyQ", RT, "range",
+             pace_sec=2.5),
+    Endpoint("TPEX_revivt_b", "TPEX", "capital_reduction_resume_ref_price", f"{TPEX}/bulletin/revivt", RT, "range",
+             pace_sec=2.5),
+    Endpoint("TPEX_pvChgRslt", "TPEX", "par_value_change_resume_ref_price", f"{TPEX}/bulletin/pvChgRslt", RT,
+             "range", pace_sec=2.5),
+    Endpoint("TPEX_etfSplitRslt", "TPEX", "etf_split_resume_ref_price", f"{TPEX}/bulletin/etfSplitRslt", RT, "range",
+             pace_sec=2.5),
+    Endpoint("TPEX_etfRvsRslt", "TPEX", "etf_reverse_split_resume_ref_price", f"{TPEX}/bulletin/etfRvsRslt", RT,
+             "range", pace_sec=2.5),
+    Endpoint("TPEX_prePost", "TPEX", "ex_right_dividend_preannounce", f"{TPEX}/bulletin/prePost",
+             (("response", "json"),), "snapshot", pace_sec=2.5),
+    Endpoint("TPEX_decap", "TPEX", "capital_reduction_preannounce", f"{TPEX}/bulletin/decap",
+             (("response", "json"),), "snapshot", pace_sec=2.5),
+    Endpoint("TPEX_sprc", "TPEX", "suspended_resumed_trading", f"{TPEX}/bulletin/sprc",
+             (("response", "json"),), "snapshot", pace_sec=2.5),
+    Endpoint("TPEX_deListed_y", "TPEX", "delisted_companies", f"{TPEX}/company/deListed",
+             (("code", ""), ("date", "{y}"), ("reason", "-1"), ("response", "json")), "year", pace_sec=2.5),
+    Endpoint("TPEX_deListed_yroc", "TPEX", "delisted_companies", f"{TPEX}/company/deListed",
+             (("code", ""), ("date", "{yroc}"), ("reason", "-1"), ("response", "json")), "year", pace_sec=2.5),
+    Endpoint("TPEX_latest_y", "TPEX", "new_listings", f"{TPEX}/company/latest",
+             (("code", ""), ("date", "{y}"), ("response", "json")), "year", pace_sec=2.5),
+    Endpoint("TPEX_latest_yroc", "TPEX", "new_listings", f"{TPEX}/company/latest",
+             (("code", ""), ("date", "{yroc}"), ("response", "json")), "year", pace_sec=2.5),
+    Endpoint("TPEX_chtm", "TPEX", "altered_trading_daily", f"{TPEX}/afterTrading/chtm", D, "day", pace_sec=2.5),
+    # --- TPEx old site / earlier guesses
     Endpoint("TPEX_exDailyQ", "TPEX", "ex_right_dividend_result", f"{TPEX}/exright/dailyQuo", RT, "range", pace_sec=2.5),
     Endpoint("TPEX_exDailyQ_old", "TPEX", "ex_right_dividend_result",
              f"{TPEX_OLD}/exright/dailyquo/exDailyQ_result.php",
@@ -106,8 +142,16 @@ CANDIDATES: list[Endpoint] = [
              f"{TPEX_OLD}/exright/revivt/revivt_result.php",
              (("l", "zh-tw"), ("d", "{sroc}"), ("ed", "{eroc}"), ("o", "json")), "range", pace_sec=2.5),
     # --- current listing masters with official listing dates (B5; current snapshot only, no delisted names)
-    Endpoint("ISIN_TWSE", "ISIN", "listed_securities_twse", ISIN, (("strMode", "2"),), "snapshot", "html", 3.0),
-    Endpoint("ISIN_TPEX", "ISIN", "listed_securities_tpex", ISIN, (("strMode", "4"),), "snapshot", "html", 3.0),
+    Endpoint("ISIN_TWSE", "ISIN", "listed_securities_twse", ISIN, (("strMode", "2"),), "snapshot", "html", 3.0, 180.0),
+    Endpoint("ISIN_TPEX", "ISIN", "listed_securities_tpex", ISIN, (("strMode", "4"),), "snapshot", "html", 3.0, 180.0),
+]
+# fetched by default (`--reports recommended`); a report that fails three periods in a row is skipped, others go on
+RECOMMENDED = [
+    "TWSE_TWT49U", "TWSE_TWTAUU", "TWSE_TWTB8U", "TWSE_TWTCAU", "TWSE_TWTAWU",
+    "TWSE_TWT48U_now", "TWSE_TWTAVU_now", "TWSE_newlisting", "TWSE_suspendListing",
+    "TPEX_exDailyQ_b", "TPEX_exDailyQ_old", "TPEX_revivt_b", "TPEX_pvChgRslt", "TPEX_etfSplitRslt", "TPEX_etfRvsRslt",
+    "TPEX_prePost", "TPEX_decap", "TPEX_sprc", "TPEX_deListed_y", "TPEX_deListed_yroc", "TPEX_latest_y",
+    "TPEX_latest_yroc", "ISIN_TWSE", "ISIN_TPEX", "TPEX_chtm",
 ]
 BY_ID = {e.id: e for e in CANDIDATES}
 
@@ -128,7 +172,7 @@ TWSE_ACTION_RE = re.compile(r"""(?:rwd/(?:zh|en)/)?\b((?:exRight|reducation|redu
 def known_at_for(ep: Endpoint, end: date, retrieved: datetime) -> str:
     if ep.mode == "snapshot":
         return retrieved.isoformat(timespec="seconds")
-    return f"{end.isoformat()}T23:59:59+08:00"
+    return min(f"{end.isoformat()}T23:59:59+08:00", retrieved.isoformat(timespec="seconds"))
 
 
 def months(start: date, end: date) -> list[tuple[date, date]]:
@@ -170,18 +214,24 @@ def summarize(body: bytes, fmt: str) -> dict:
             "first_row": json.dumps(first[2][0], ensure_ascii=False)[:400] if first and first[2] else ""}
 
 
+BAD_STAT = ("錯誤", "error", "參數", "invalid")
+
+
 def valid(ep: Endpoint, status: int, body: bytes) -> bool:
-    """A response worth keeping as evidence: HTTP 200 and the expected format (an empty month is valid)."""
+    """A response worth keeping as evidence: HTTP 200, the expected format, and no parameter-error stat
+    (an empty period is valid)."""
     if status != 200:
         return False
     s = summarize(body, ep.fmt)
-    return s["json"] if ep.fmt == "json" else s["html"]
+    if ep.fmt != "json":
+        return s["html"]
+    return s["json"] and not any(b in s["stat"].lower() for b in BAD_STAT)
 
 
 def request(ep: Endpoint, s: date, e: date, getter=OV.http_get) -> tuple[dict, bytes]:
     params = {k: _rng(v, s, e) for k, v in ep.params}
     t0 = datetime.now(TAIPEI)
-    status, body, ctype, final = getter(ep.url, params)
+    status, body, ctype, final = getter(ep.url, params) if ep.timeout is None else getter(ep.url, params, ep.timeout)
     rec = {"report": ep.id, "exchange": ep.exchange, "kind": ep.kind, "mode": ep.mode, "start": s.isoformat(),
            "end": e.isoformat(), "url": ep.url, "params": json.dumps(params, ensure_ascii=False), "final_url": final,
            "http_status": status, "content_type": ctype, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(),
@@ -308,7 +358,19 @@ def _done(sd: Path) -> bool:
 def plan(ep: Endpoint, start: date, end: date, today: date) -> list[tuple[str, date, date]]:
     if ep.mode == "snapshot":
         return [(f"snapshot_{today.isoformat()}", today, today)]
+    if ep.mode == "year":
+        return [(f"{y}", date(y, 1, 1), min(date(y, 12, 31), end)) for y in range(start.year, end.year + 1)]
+    if ep.mode == "day":
+        days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        return [(d.isoformat(), d, d) for d in days if d.weekday() < 5]
     return [(f"{a:%Y-%m}", a, b) for a, b in months(start, end)]
+
+
+def period_name(ep: Endpoint, period: str, b: date, today: date) -> str:
+    """Periods that are not finished yet are stored under a dated name, so later runs add a newer copy."""
+    if ep.mode in ("range", "year") and b >= today:
+        return f"{period}_asof_{today.isoformat()}"
+    return period
 
 
 def fetch(root: Path, work_dir: Path, ids: list[str], start: date, end: date, max_minutes: float = 55.0,
@@ -323,9 +385,7 @@ def fetch(root: Path, work_dir: Path, ids: list[str], start: date, end: date, ma
     todo = {ep.exchange: [] for ep in eps}
     for ep in eps:
         for period, a, b in plan(ep, start, end, today):
-            # the current (unfinished) month is always re-fetched into a new snapshot-dated period
-            if ep.mode == "range" and b >= today:
-                period = f"{period}_asof_{today.isoformat()}"
+            period = period_name(ep, period, b, today)
             if not _done(shard(root, ep, period)):
                 todo[ep.exchange].append((ep, period, a, b))
     rec = {"run_id": run_id, "ca_version": CA_VERSION, "git_sha": git_sha(), "reports": ids,
@@ -334,11 +394,13 @@ def fetch(root: Path, work_dir: Path, ids: list[str], start: date, end: date, ma
            "todo_at_start": sum(len(v) for v in todo.values()), "done": [], "failed": [], "stopped": ""}
 
     def host(items):
-        failed = 0
+        failed: dict[str, int] = {}
         for ep, period, a, b in items:
             if (time.monotonic() - t0) / 60 > max_minutes:
                 rec["stopped"] = rec["stopped"] or f"time budget {max_minutes} min"
                 return
+            if failed.get(ep.id, 0) >= max_failed_in_row:
+                continue                                   # this report is skipped; the others go on
             r, body = g(ep, a, b)
             local = work_dir / f"report={ep.id}" / f"period={period}"
             if local.exists():
@@ -357,15 +419,15 @@ def fetch(root: Path, work_dir: Path, ids: list[str], start: date, end: date, ma
                 (dest / "_SUCCESS").write_text(json.dumps({"finished_at": datetime.now(TAIPEI).isoformat(
                     timespec="seconds"), "git_sha": git_sha(), "ca_version": CA_VERSION}), encoding="utf-8")
                 rec["done"].append(f"{ep.id}/{period}")
-                failed = 0
+                failed[ep.id] = 0
             else:
-                rec["failed"].append({"report": ep.id, "period": period, "http": r["http_status"]})
-                failed += 1
-            log(f"{ep.id} {period}: http={r['http_status']} rows={r['rows']} {'ok' if ok else 'FAILED'}")
-            if failed >= max_failed_in_row:
-                rec["stopped"] = f"{ep.exchange}: {failed} failures in a row"
-                log(rec["stopped"] + " - stopping this host; rerun later")
-                return
+                rec["failed"].append({"report": ep.id, "period": period, "http": r["http_status"], "stat": r["stat"]})
+                failed[ep.id] = failed.get(ep.id, 0) + 1
+            log(f"{ep.id} {period}: http={r['http_status']} stat={r['stat'][:30]!r} rows={r['rows']} "
+                f"{'ok' if ok else 'FAILED'}")
+            if failed.get(ep.id, 0) == max_failed_in_row:
+                rec.setdefault("skipped_reports", []).append(ep.id)
+                log(f"{ep.id}: {max_failed_in_row} failures in a row - report skipped for this run")
             sleep(ep.pace_sec)
 
     with ThreadPoolExecutor(max_workers=max(1, len(todo))) as pool:
@@ -383,8 +445,7 @@ def status(root: Path, ids: list[str], start: date, end: date, today: date | Non
     for i in ids:
         ep = BY_ID[i]
         periods = plan(ep, start, end, today)
-        done = sum(_done(shard(root, ep, p if not (ep.mode == "range" and b >= today) else f"{p}_asof_{today}"))
-                   for p, _a, b in periods)
+        done = sum(_done(shard(root, ep, period_name(ep, p, b, today))) for p, _a, b in periods)
         rows.append({"report": i, "periods": len(periods), "done": done, "remaining": len(periods) - done})
     return pd.DataFrame(rows)
 
@@ -469,11 +530,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out-dir", required=True)
     p.add_argument("--start", default="2025-06-01")
     p.add_argument("--end", default="2025-06-30")
-    p.add_argument("--reports", default="")
+    p.add_argument("--reports", default="", help="comma-separated ids, 'recommended', or empty for all")
     for name in ("fetch", "status"):
         p = sub.add_parser(name)
         p.add_argument("--dataset-root", required=True)
-        p.add_argument("--reports", required=True, help="comma-separated endpoint ids chosen after the probe")
+        p.add_argument("--reports", default="recommended",
+                       help="comma-separated endpoint ids, or 'recommended' (see `list`)")
         p.add_argument("--start", default="2023-05-01")
         p.add_argument("--end", default="")
         if name == "fetch":
@@ -485,19 +547,21 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("list")
     a = ap.parse_args(argv)
     if a.cmd == "list":
-        print(pd.DataFrame([asdict(e) for e in CANDIDATES])[["id", "exchange", "kind", "mode", "url"]].to_string())
+        t = pd.DataFrame([asdict(e) for e in CANDIDATES])[["id", "exchange", "kind", "mode", "url"]]
+        t["recommended"] = t["id"].isin(RECOMMENDED)
+        print(t.to_string())
         return 0
     if a.cmd == "discover":
         print("written:", discover(Path(a.out_dir)))
         return 0
     if a.cmd == "probe":
-        ids = [x for x in a.reports.split(",") if x] or None
+        ids = RECOMMENDED if a.reports == "recommended" else ([x for x in a.reports.split(",") if x] or None)
         print("written:", probe(Path(a.out_dir), date.fromisoformat(a.start), date.fromisoformat(a.end), ids))
         return 0
     if a.cmd == "parse":
         print("written:", parse(Path(a.dataset_root), Path(a.out_dir)))
         return 0
-    ids = [x for x in a.reports.split(",") if x]
+    ids = RECOMMENDED if a.reports == "recommended" else [x for x in a.reports.split(",") if x]
     unknown = [i for i in ids if i not in BY_ID]
     if unknown:
         raise SystemExit(f"unknown report ids: {unknown}; see `list`")
@@ -506,8 +570,10 @@ def main(argv: list[str] | None = None) -> int:
         print(status(Path(a.dataset_root), ids, date.fromisoformat(a.start), end).to_string(index=False))
         return 0
     rec = fetch(Path(a.dataset_root), Path(a.work_dir), ids, date.fromisoformat(a.start), end, a.max_minutes)
-    print(json.dumps({k: (v if not isinstance(v, list) else len(v)) for k, v in rec.items()}, ensure_ascii=False))
-    return 0 if not rec["failed"] else 1
+    summary = {k: (len(v) if k in ("done", "failed") else v) for k, v in rec.items()}
+    print(json.dumps(summary, ensure_ascii=False))
+    print(status(Path(a.dataset_root), ids, date.fromisoformat(a.start), end).to_string(index=False))
+    return 0 if not rec.get("skipped_reports") else 1
 
 
 if __name__ == "__main__":
