@@ -161,3 +161,26 @@ def test_status_counts_dated_copies_after_midnight(tmp_path):
                    today=date(2026, 10, 31)).set_index("report")
     assert st.at["TWSE_TWT49U", "remaining"] == 0 and st.at["ISIN_TWSE", "remaining"] == 0
     assert st.at["TWSE_TWT49U", "latest_dated_copy"] == "2026-10_asof_2026-10-30"
+
+
+def test_discover2_finds_tpex_table_actions_and_probes(tmp_path):
+    menu = {"items": [{"title": "ETN 到期或終止上櫃資訊", "url": "/zh-tw/product/etn/product/delisted.html"}]}
+    page = ('<form id="tables-form"><input hidden="hidden" name="type" value="delisted"></form>'
+            '<script>tables.init({pattern:API_PATTERN,action:"ETN/list",option:""});</script>')
+    body = json.dumps({"stat": "ok", "tables": [{"title": "t", "fields": ["代號", "到期日"], "data": [["020000", "2025/01/02"]]}]},
+                      ensure_ascii=False).encode()
+    calls = []
+
+    def get(url, params, *_):
+        calls.append((url, dict(params)))
+        if url.endswith("menu.json"):
+            return 200, json.dumps(menu, ensure_ascii=False).encode(), "application/json", url
+        if url.endswith("delisted.html"):
+            return 200, page.encode(), "text/html", url
+        if url.endswith("ETN/list"):
+            return 200, body, "application/json", url
+        return 404, b"", "", url
+    out = CA.discover2(tmp_path, getter=get, sleep=lambda *_: None, log=lambda *_: None)
+    p = pd.read_csv(out / "probe_summary.csv")
+    assert len(p) == 1 and p.iloc[0]["rows"] == 1
+    assert ("https://www.tpex.org.tw/www/zh-tw/ETN/list", {"type": "delisted", "response": "json"}) in calls
