@@ -418,3 +418,21 @@
 - **隔離**：完整日有負殘差的交易所日期整天隔離。同日其他股票（包括 K 棒完整的）不會升級為可信。
 - **BFT41U 完整度修正**：列數偏低的報表，若獨立重抓結果 HTTP 200、股票數相同、數值 0 差異，即改判為完整，並記錄在 `reference_completeness_cleared.csv`。
 - **欄位、層級與防前視規則**：見 `docs/BACKTEST_DATA_CONTRACT.md`。
+
+## 16. B1 整合驗收（`tw_lake.audit.integration_check`）
+
+用來驗證一次 quality_mask 執行結果，全程唯讀，只在 `audits/integration_check/<時間>_<sha>/` 寫入結果檔。檢查項目：
+
+- `quality_manifest.json` 列出的每個輸出檔與輸入檔，SHA-256 都相符。
+- 產生遮罩的 code commit 正確。
+- 遮罩依據的 fubon_5m seq，與目前 published 的 seq 一致。
+- 四個層級的股票日數重新計算後，與 manifest 一致。
+- 12 條規則全部成立：
+  - UNKNOWN 不算可用
+  - 隔離日期不在可用樣本
+  - 量能樣本是價格樣本的子集，Level A 也是價格樣本的子集
+  - 可用樣本都是正常盤，且都有前一日官方紀錄
+  - 其他規則見程式
+- 抽查可用股票日，K 棒數與 5 分 K 成交量和原始分區一致。
+
+以上全部通過才判定 PASS，exit code 為 0。
