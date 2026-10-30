@@ -48,7 +48,7 @@ from ..clock import TAIPEI
 from ..run_context import git_sha
 from . import official_volume as OV
 
-CA_VERSION = "0.2.0"
+CA_VERSION = "0.3.0"
 TWSE = "https://www.twse.com.tw/rwd/zh"
 TWSE_WWW = "https://www.twse.com.tw"
 TPEX = "https://www.tpex.org.tw/www/zh-tw"
@@ -131,6 +131,9 @@ CANDIDATES: list[Endpoint] = [
     Endpoint("TPEX_latest_yroc", "TPEX", "new_listings", f"{TPEX}/company/latest",
              (("code", ""), ("date", "{yroc}"), ("response", "json")), "year", pace_sec=2.5),
     Endpoint("TPEX_chtm", "TPEX", "altered_trading_daily", f"{TPEX}/afterTrading/chtm", D, "day", pace_sec=2.5),
+    # read from the saved page product/etn/product/delisted.html: tables.init({action:"ETN/list"}), hidden type=delisted
+    Endpoint("TPEX_ETN_delisted", "TPEX", "etn_matured_or_delisted", f"{TPEX}/ETN/list",
+             (("type", "delisted"), ("response", "json")), "snapshot", pace_sec=2.5),
     # --- TPEx old site / earlier guesses
     Endpoint("TPEX_exDailyQ", "TPEX", "ex_right_dividend_result", f"{TPEX}/exright/dailyQuo", RT, "range", pace_sec=2.5),
     Endpoint("TPEX_exDailyQ_old", "TPEX", "ex_right_dividend_result",
@@ -151,7 +154,7 @@ RECOMMENDED = [
     "TWSE_TWT48U_now", "TWSE_TWTAVU_now", "TWSE_newlisting", "TWSE_suspendListing",
     "TPEX_exDailyQ_b", "TPEX_exDailyQ_old", "TPEX_revivt_b", "TPEX_pvChgRslt", "TPEX_etfSplitRslt", "TPEX_etfRvsRslt",
     "TPEX_prePost", "TPEX_decap", "TPEX_sprc", "TPEX_deListed_y", "TPEX_deListed_yroc", "TPEX_latest_y",
-    "TPEX_latest_yroc", "ISIN_TWSE", "ISIN_TPEX", "TPEX_chtm",
+    "TPEX_latest_yroc", "ISIN_TWSE", "ISIN_TPEX", "TPEX_ETN_delisted", "TPEX_chtm",
 ]
 BY_ID = {e.id: e for e in CANDIDATES}
 
@@ -308,6 +311,106 @@ def discover(out_dir: Path, getter=OV.http_get, sleep=time.sleep, log=print) -> 
         log(f"TPEX {title}: http={st} actions={len(acts)}")
         sleep(1.5)
     pd.DataFrame(rows).to_csv(out / "discovered_actions.csv", index=False, encoding="utf-8-sig")
+    return out
+
+
+# ------------------------------------------------------------------------------------------------ discover2
+DISCOVER2_KEYWORDS = ("下市", "終止", "到期", "下櫃", "國外成分", "漲跌幅", "特別股", "ETN", "ETF", "受益證券", "存託憑證",
+                      "槓桿", "反向", "期貨")
+TWSE_SCRIPTS = ["/res/js/main.js", "/res/js/web.js", "/res/js/web-sitemap.js"]
+TWSE_SEED_PAGES = ["/zh/report-index.html", "/zh/sitemap.html", "/zh/products/securities/etf/products/foreign.html",
+                   "/zh/ETFortune/index"]
+TWSE_PATH_KEYWORDS = ("delist", "suspend", "etf", "etn", "foreign", "limit", "preferred", "tdr", "reit", "fortune",
+                      "termin", "expire", "listed")
+API_RE = re.compile(r"""["'`](/?rwd/(?:zh|en)/[A-Za-z0-9_/\-]+|/?(?:api|rwd)/[A-Za-z0-9_/\-]+)["'`]""")
+TPEX_TABLE_ACTION_RE = re.compile(r"""action\s*:\s*["']([^"']+)["']""")
+HIDDEN_RE = re.compile(r"""<input[^>]*hidden[^>]*name="([^"]+)"[^>]*value="([^"]*)"|<input[^>]*name="([^"]+)"[^>]*"""
+                       r"""value="([^"]*)"[^>]*hidden""")
+
+
+def _hidden(page: str) -> dict:
+    out = {}
+    for m in HIDDEN_RE.finditer(page):
+        k, v = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+        out[k] = v
+    return out
+
+
+def discover2(out_dir: Path, getter=OV.http_get, sleep=time.sleep, log=print, max_pages: int = 120) -> Path:
+    """Second discovery round (B4 / B5 lists): crawl the TWSE menu data and TPEx menu for pages about delisted /
+    matured ETF, ETN, preferred shares and price-limit rules, extract the API actions the pages call, and probe
+    each action once with the page's own hidden parameters. Everything received is saved."""
+    out = Path(out_dir) / f"ca_discovery2_{datetime.now(TAIPEI):%Y%m%d_%H%M%S}"
+    (out / "pages").mkdir(parents=True)
+    (out / "probe").mkdir()
+    pages: dict[str, str] = {}
+    texts = []
+    for sc in TWSE_SCRIPTS:
+        st, b, _, _ = getter(TWSE_WWW + sc, {})
+        t = b.decode("utf-8", errors="replace")
+        (out / f"twse{re.sub(r'[^A-Za-z0-9]+', '_', sc)}").write_bytes(b)
+        texts.append(t)
+        for j in sorted(set(re.findall(r"""["'](/[A-Za-z0-9_/\-]+\.json)["']""", t)))[:20]:
+            s2, jb, _, _ = getter(TWSE_WWW + j, {})
+            (out / f"twse{re.sub(r'[^A-Za-z0-9]+', '_', j)}").write_bytes(jb)
+            texts.append(jb.decode("utf-8", errors="replace"))
+            sleep(0.5)
+        sleep(0.5)
+    for t in texts:
+        for m in re.finditer(r"""["'](/zh/[A-Za-z0-9_/\-]+(?:\.html)?)["'][^"'\n]{0,200}?["']?([^"'<>\n]{0,40})""", t):
+            pages.setdefault(m.group(1), m.group(2))
+    for sp in TWSE_SEED_PAGES:
+        pages.setdefault(sp, "seed")
+    twse = [(u, t) for u, t in pages.items() if u in TWSE_SEED_PAGES
+            or any(k in u.lower() for k in TWSE_PATH_KEYWORDS) or any(k in t for k in DISCOVER2_KEYWORDS)]
+    rows = []
+    for path, title in twse[:max_pages]:
+        st, b, _, _ = getter(TWSE_WWW + path, {})
+        page = b.decode("utf-8", errors="replace")
+        (out / "pages" / f"twse{re.sub(r'[^A-Za-z0-9]+', '_', path)[:120]}").write_bytes(b)
+        acts = sorted({a.lstrip("/") for a in API_RE.findall(page)})
+        rows.append({"site": "TWSE", "title": title, "url": TWSE_WWW + path, "http_status": st,
+                     "actions": "|".join(acts), "hidden": json.dumps(_hidden(page), ensure_ascii=False)})
+        sleep(1.0)
+    st, b, _, _ = getter(OV.TPEX_MENU, {})
+    try:
+        items = list(OV._menu_items(json.loads(b.decode("utf-8", errors="replace"))))
+    except Exception:  # noqa: BLE001
+        items = []
+    items = [(t, u if u.startswith("http") else "https://www.tpex.org.tw" + (u if u.startswith("/") else "/" + u))
+             for t, u in items]
+    for title, href in [(t, u) for t, u in dict.fromkeys(items)
+                        if any(k in t for k in DISCOVER2_KEYWORDS) and u.endswith(".html")][:max_pages]:
+        st, b, _, _ = getter(href, {})
+        page = b.decode("utf-8", errors="replace")
+        (out / "pages" / ("tpex_" + re.sub(r"[^A-Za-z0-9]+", "_", href.split("tpex.org.tw/")[-1])[:120])).write_bytes(b)
+        acts = sorted(set(TPEX_TABLE_ACTION_RE.findall(page)))
+        rows.append({"site": "TPEX", "title": title, "url": href, "http_status": st, "actions": "|".join(acts),
+                     "hidden": json.dumps(_hidden(page), ensure_ascii=False)})
+        sleep(1.0)
+    found = pd.DataFrame(rows)
+    found.to_csv(out / "discovered_pages.csv", index=False, encoding="utf-8-sig")
+    probes, seen = [], set()
+    for r in found.itertuples(index=False):
+        hidden = json.loads(r.hidden or "{}")
+        for act in [a for a in str(r.actions).split("|") if a]:
+            if r.site == "TWSE":
+                url = TWSE_WWW + "/" + act if not act.startswith("http") else act
+            else:
+                url = f"{TPEX}/{act}"
+            key = (url, json.dumps(hidden, sort_keys=True))
+            if key in seen or "codeQuery" in act:
+                continue
+            seen.add(key)
+            params = {**{k: v for k, v in hidden.items() if k not in ("query",)}, "response": "json"}
+            st, body, ctype, final = getter(url, params)
+            name = re.sub(r"[^A-Za-z0-9]+", "_", f"{r.site}_{act}_{'_'.join(hidden.values())}")[:120]
+            (out / "probe" / f"{name}.gz").write_bytes(gzip.compress(body, mtime=0))
+            probes.append({"site": r.site, "page_title": r.title, "url": url, "params": json.dumps(params, ensure_ascii=False),
+                           "http_status": st, "bytes": len(body), **summarize(body, "json")})
+            log(f"{r.site} {act} {hidden}: http={st} rows={probes[-1]['rows']} fields={probes[-1]['fields'][:80]}")
+            sleep(2.0)
+    pd.DataFrame(probes).to_csv(out / "probe_summary.csv", index=False, encoding="utf-8-sig")
     return out
 
 
@@ -539,6 +642,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("discover")
     p.add_argument("--out-dir", required=True)
+    p = sub.add_parser("discover2")
+    p.add_argument("--out-dir", required=True)
     p = sub.add_parser("probe")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--start", default="2025-06-01")
@@ -566,6 +671,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "discover":
         print("written:", discover(Path(a.out_dir)))
+        return 0
+    if a.cmd == "discover2":
+        print("written:", discover2(Path(a.out_dir)))
         return 0
     if a.cmd == "probe":
         ids = RECOMMENDED if a.reports == "recommended" else ([x for x in a.reports.split(",") if x] or None)

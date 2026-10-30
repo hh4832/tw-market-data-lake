@@ -146,3 +146,62 @@ def test_run_offline_from_reference_dataset(tmp_path):
     s = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     assert s["limit_rule_match_overall"] == 1.0 and s["no_price_limit_events"] == 1
     assert (out / "corporate_events.parquet").exists() and (out / "run_info.json").exists()
+
+
+# ---------------------------------------------------------------- v0.2: adjustment factors and explanations
+def test_adjustment_factors_shift_to_next_trading_day():
+    ev = C.build_events(_wide())
+    cal = pd.DatetimeIndex(pd.to_datetime(["2025-06-02", "2025-06-03", "2025-06-05", "2025-06-19", "2026-03-31"]))
+    af = C.adjustment_factors(ev, cal).set_index("symbol")
+    assert af.at["00679B", "effective_date"] == pd.Timestamp("2025-06-05")     # 06-04 closed (e.g. typhoon)
+    assert bool(af.at["00679B", "date_shifted"]) and not bool(af.at["1598", "date_shifted"])
+    assert af.at["0050", "effective_date"] == pd.Timestamp("2025-06-19")
+    assert af.at["0050", "share_factor_est"] == pytest.approx(188.65 / 47.16)
+    assert np.isnan(af.at["1598", "share_factor_est"]) and af.at["1598", "price_factor"] == pytest.approx(22.2 / 22.7)
+    assert af.at["0050", "known_at"] == "2025-06-19T08:30:00+08:00"
+
+
+def test_explain_jumps():
+    ev = C.build_events(_wide())
+    cal = pd.DatetimeIndex(pd.to_datetime(["2025-06-02", "2025-06-03", "2025-06-05"]))
+    af = C.adjustment_factors(ev, cal)
+    j = pd.DataFrame({"symbol": ["1598", "00679B", "9999"], "implied_factor": 0.98,
+                      "jump_date": pd.to_datetime(["2025-06-02", "2025-06-05", "2025-06-05"])})
+    e = C.explain_jumps(j, af).set_index("symbol")["status"]
+    assert e["1598"] == "MATCH_OFFICIAL_DATE" and e["00679B"] == "MATCH_EFFECTIVE_DATE" and e["9999"] == "UNEXPLAINED"
+
+
+def test_chtm_flags_and_violation_causes():
+    chtm = {"TPEX_chtm": pd.DataFrame({"period": ["2025-01-06"], "table": "0", "row": [0], "sha256": "s",
+                                       "證券代號": ["6103"], "變更交易": ["Ｙ"], "分盤交易": [np.nan],
+                                       "屬管理股票": [""], "分盤或管理股票撮合循環時間(分鐘)": [""], "停止交易": [""]})}
+    ch = C.chtm_flags(chtm)
+    assert bool(ch.at[0, "altered"]) and not bool(ch.at[0, "split_session"])
+    raw = pd.DataFrame({"symbol": ["6103", "6103", "2330", "2330", "2330"],
+                        "date": pd.to_datetime(["2025-01-02", "2025-01-06", "2025-01-02", "2025-01-03", "2025-01-06"]),
+                        "close": [10.0, 12.0, 100.0, 100.0, 112.0], "volume_shares": 1000})
+    cal = C.trading_calendar(raw)
+    viol = pd.DataFrame({"symbol": ["6103", "2330", "00999"], "date": pd.to_datetime(["2025-01-06"] * 3),
+                         "close": [12.0, 112.0, 20.0], "prev_close": [10.0, 100.0, 15.0],
+                         "instrument": ["stock", "stock", "fund_like"]})
+    af = C.adjustment_factors(C.build_events(_wide()), cal)
+    v = C.enrich_violations(viol, raw, cal, ch, af).set_index("symbol")
+    assert v.at["6103", "likely_cause"] == "previous_trading_day_without_price"     # 01-03 had no 6103 price
+    assert v.at["2330", "likely_cause"] == "unexplained"
+    assert v.at["00999", "likely_cause"] == "fund_like_probably_no_price_limit"
+
+
+def test_transfer_check(tmp_path):
+    li = pd.DataFrame({"exchange": ["TPEX", "TWSE"], "symbol": ["8476", "8476"], "name": "x",
+                       "event": ["delisted", "listed"], "date": pd.to_datetime(["2023-10-31", "2023-10-31"]),
+                       "detail": "", "report": "r", "period": "p", "sha256": "s"})
+    m = pd.DataFrame({"symbol": "8476", "date": ["2023-10-30", "2023-10-31", "2023-11-01"],
+                      "exchange": ["TPEX", "TWSE", "TPEX"], "can_use_for_price_backtest": [True, True, True]})
+    m.to_parquet(tmp_path / "mask.parquet")
+    t = C.transfer_check(tmp_path / "mask.parquet", li)
+    assert t.iloc[0]["wrong_exchange"] == 1 and t.iloc[0]["wrong_and_usable"] == 1
+
+
+def test_official_rows_trace():
+    tr = C.official_rows(_wide(), ["0050"])
+    assert set(tr["report"]) == {"TWSE_TWTCAU"}

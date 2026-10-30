@@ -37,7 +37,7 @@ from ..run_context import git_sha
 from ..reference import corporate_actions as CA
 from .stagelog import Stages
 
-EVENTS_VERSION = "0.1.0"
+EVENTS_VERSION = "0.2.0"
 EVENT_COLUMNS = ["exchange", "symbol", "name", "event_type", "event_date", "prev_close", "ref_price", "open_ref",
                  "limit_up", "limit_down", "cash_dividend", "stock_per_1000", "price_factor", "detail",
                  "known_at", "report", "period", "sha256"]
@@ -394,6 +394,120 @@ def inferred_without_official(raw: pd.DataFrame, li: pd.DataFrame, last_day: pd.
     return p
 
 
+# ------------------------------------------------------------------------------------------- B3 v0.2
+def trading_calendar(raw: pd.DataFrame) -> pd.DatetimeIndex:
+    """Market trading days = dates on which any symbol traded (FinLab raw, volume > 0)."""
+    v = raw["volume_shares"] if "volume_shares" in raw.columns else raw["close"]
+    return pd.DatetimeIndex(sorted(raw.loc[v.fillna(0) > 0, "date"].unique()))
+
+
+def adjustment_factors(ev: pd.DataFrame, cal: pd.DatetimeIndex) -> pd.DataFrame:
+    """Official price-adjustment table (replaces the FinLab adjusted snapshot).
+
+    effective_date = first market trading day on or after the official date (official dates can fall on market
+    closures, e.g. typhoon days; FinLab then adjusts on the next trading day). price_factor = official reference
+    price / official pre-event close: multiply prices BEFORE effective_date by it to put them on the new basis.
+    share_factor_est = 1 / price_factor for pure stock dividends, splits and reverse splits (shares held scale
+    inversely; estimated, cash parts and rights subscriptions are not modelled) and NaN otherwise. known_at =
+    effective_date 08:30 (the reference price is the opening basis of that day). Nothing here is applied to any
+    stored price."""
+    e = ev.copy()
+    pos = cal.searchsorted(e["event_date"].values, side="left")
+    e["effective_date"] = [cal[i] if i < len(cal) else pd.NaT for i in pos]
+    e["date_shifted"] = e["effective_date"].notna() & (e["effective_date"] != e["event_date"])
+    e["price_factor"] = e["ref_price"] / e["prev_close"]
+    pure = e["event_type"].isin(["stock_dividend", "etf_split", "etf_reverse_split", "par_value_change"])
+    e["share_factor_est"] = np.where(pure, 1 / e["price_factor"], np.nan)
+    e["known_at"] = e["effective_date"].dt.strftime("%Y-%m-%dT08:30:00+08:00")
+    e["factor_valid"] = e["price_factor"].between(1e-3, 1e3) & e["effective_date"].notna()
+    cols = ["exchange", "symbol", "name", "event_type", "event_date", "effective_date", "date_shifted", "prev_close",
+            "ref_price", "price_factor", "share_factor_est", "cash_dividend", "stock_per_1000", "limit_up",
+            "limit_down", "known_at", "factor_valid", "report", "sha256"]
+    return e[cols].sort_values(["symbol", "effective_date"]).reset_index(drop=True)
+
+
+def explain_jumps(jumps: pd.DataFrame, af: pd.DataFrame, since: str = "2023-05-01") -> pd.DataFrame:
+    """FinLab adjustment jumps (in scope) -> matched on the official effective date / unexplained."""
+    j = jumps[jumps["jump_date"] >= pd.Timestamp(since)].copy()
+    keys = set(zip(af["symbol"], af["effective_date"]))
+    raw_keys = set(zip(af["symbol"], af["event_date"]))
+    j["status"] = np.select([[(s, d) in raw_keys for s, d in zip(j["symbol"], j["jump_date"])],
+                             [(s, d) in keys for s, d in zip(j["symbol"], j["jump_date"])]],
+                            ["MATCH_OFFICIAL_DATE", "MATCH_EFFECTIVE_DATE"], default="UNEXPLAINED")
+    return j
+
+
+def official_rows(wide: dict[str, pd.DataFrame], symbols: list[str]) -> pd.DataFrame:
+    """Every official row (any report) that mentions one of the symbols - for case review (e.g. 8101)."""
+    out = []
+    for rep, w in wide.items():
+        hit = w.apply(lambda r: any(re.split(r"[\s\u3000,]+", str(v).strip())[0] in symbols for v in r.values), axis=1)
+        if hit.any():
+            x = w[hit].copy()
+            x.insert(0, "report", rep)
+            out.append(x.astype(str))
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+def chtm_flags(wide: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """TPEx daily altered-trading list -> symbol, date, flags (Y when set)."""
+    w = wide.get("TPEX_chtm")
+    if w is None or not len(w):
+        return pd.DataFrame(columns=["symbol", "date", "altered", "split_session", "managed", "cycle_min", "halted"])
+    g = lambda c: w[c].fillna("").astype(str).str.strip() if c in w.columns else pd.Series("", index=w.index)  # noqa: E731
+    return pd.DataFrame({"symbol": g("證券代號"), "date": pd.to_datetime(w["period"].str[:10], errors="coerce"),
+                         "altered": g("變更交易").ne(""), "split_session": g("分盤交易").ne(""),
+                         "managed": g("屬管理股票").ne(""), "cycle_min": g("分盤或管理股票撮合循環時間(分鐘)").map(num),
+                         "halted": g("停止交易").ne("")})
+
+
+def enrich_violations(viol: pd.DataFrame, raw: pd.DataFrame, cal: pd.DatetimeIndex, chtm: pd.DataFrame,
+                      af: pd.DataFrame) -> pd.DataFrame:
+    """Ordinary-day limit violations with the most likely explanation; nothing is excluded here."""
+    v = viol.copy()
+    r = raw[raw["close"].notna()][["symbol", "date"]].sort_values(["symbol", "date"])
+    r["prev_priced"] = r.groupby("symbol")["date"].shift(1)
+    v = v.merge(r, on=["symbol", "date"], how="left")
+    ci = {d: i for i, d in enumerate(cal)}
+    v["trading_days_since_prev_price"] = [ci.get(d, np.nan) - ci.get(p, np.nan) if pd.notna(p) else np.nan
+                                          for d, p in zip(v["date"], v["prev_priced"])]
+    v = v.merge(chtm, on=["symbol", "date"], how="left")
+    ev_near = af.groupby("symbol")["effective_date"].apply(list).to_dict()
+    v["official_event_within_5d"] = [any(abs((d - x).days) <= 5 for x in ev_near.get(s, [])) for s, d in
+                                     zip(v["symbol"], v["date"])]
+    v["move_vs_prev_close"] = v["close"] / v["prev_close"] - 1
+    v["likely_cause"] = np.select(
+        [v["instrument"] == "fund_like",
+         v["trading_days_since_prev_price"] > 1,
+         v["official_event_within_5d"],
+         v[["altered", "split_session", "managed", "halted"]].fillna(False).any(axis=1)],
+        ["fund_like_probably_no_price_limit", "previous_trading_day_without_price",
+         "official_event_nearby", "tpex_altered_or_managed_trading"], default="unexplained")
+    return v
+
+
+def transfer_check(mask_path: Path, li: pd.DataFrame) -> pd.DataFrame:
+    """Board transfers (delisted from one exchange and listed on the other on the same date): the quality mask's
+    exchange must be the old exchange before and the new exchange from the transfer date."""
+    d = li[li["event"] == "delisted"][["symbol", "exchange", "date"]]
+    a = li[li["event"] == "listed"][["symbol", "exchange", "date"]]
+    t = d.merge(a, on=["symbol", "date"], suffixes=("_from", "_to"))
+    t = t[t["exchange_from"] != t["exchange_to"]]
+    if not len(t) or not Path(mask_path).exists():
+        return t.assign(symbol_days=0, wrong_exchange=0)
+    m = pd.read_parquet(mask_path, columns=["symbol", "exchange", "date", "can_use_for_price_backtest"])
+    m["date"] = pd.to_datetime(m["date"])
+    rows = []
+    for r in t.itertuples(index=False):
+        x = m[m["symbol"] == r.symbol]
+        exp = np.where(x["date"] < r.date, r.exchange_from, r.exchange_to)
+        bad = x["exchange"].values != exp
+        rows.append({"symbol": r.symbol, "transfer_date": r.date, "from": r.exchange_from, "to": r.exchange_to,
+                     "symbol_days": int(len(x)), "wrong_exchange": int(bad.sum()),
+                     "wrong_and_usable": int((bad & x["can_use_for_price_backtest"].values).sum())})
+    return pd.DataFrame(rows)
+
+
 # ------------------------------------------------------------------------------------------- lake io
 def load_lake(data_root: Path, start: str = "2023-01-01", log=print) -> tuple[pd.DataFrame, pd.DataFrame]:
     from ..config import load_config
@@ -451,11 +565,13 @@ def first_bars(data_root: Path, ev: pd.DataFrame, workers: int = 16, log=print) 
 
 
 # ------------------------------------------------------------------------------------------- run
-def run(dataset_root: Path, out_root: Path, data_root: Path | None = None, with_5m: bool = False, log=print) -> Path:
+def run(dataset_root: Path, out_root: Path, data_root: Path | None = None, with_5m: bool = False,
+        mask_path: Path | None = None, trace_symbols: tuple = ("8101",), log=print) -> Path:
     out = Path(out_root) / f"corporate_events_{datetime.now(TAIPEI):%Y%m%d_%H%M%S}_{git_sha()[:7]}"
     out.mkdir(parents=True, exist_ok=False)
     st = Stages(out, "corporate_events", {"dataset_root": str(dataset_root), "data_root": str(data_root),
-                                          "with_5m": with_5m, "events_version": EVENTS_VERSION}, log=log)
+                                          "with_5m": with_5m, "mask_path": str(mask_path),
+                                          "events_version": EVENTS_VERSION}, log=log)
     summary: dict = {}
     with st.stage("events") as rec:
         wide = load_wide(dataset_root)
@@ -505,6 +621,29 @@ def run(dataset_root: Path, out_root: Path, data_root: Path | None = None, with_
             summary["inferred_delisted_without_official"] = inf[~inf["official_delisting"]].groupby(
                 "code_class").size().to_dict()
             rec.update(events_in_scope=int(scope.sum()), jumps=len(jumps))
+        with st.stage("b3_b5_v2") as rec:
+            cal = trading_calendar(raw)
+            af = adjustment_factors(ev, cal)
+            af.to_parquet(out / "official_adjustment_factors.parquet", index=False)
+            ej = explain_jumps(jumps, af)
+            ej.to_csv(out / "finlab_jumps_explained.csv", index=False, encoding="utf-8-sig")
+            summary["finlab_jumps_since_2023_05"] = ej["status"].value_counts().to_dict()
+            summary["official_dates_shifted_to_next_trading_day"] = int(af["date_shifted"].sum())
+            ch = chtm_flags(wide)
+            ev2 = enrich_violations(ndv, raw, cal, ch, af)
+            ev2.to_csv(out / "ordinary_day_limit_violations_explained.csv", index=False, encoding="utf-8-sig")
+            summary["ordinary_day_violation_causes"] = ev2.groupby(["instrument", "likely_cause"]).size() \
+                .rename("n").reset_index().to_dict("records")
+            tr = official_rows(wide, list(trace_symbols))
+            tr.to_csv(out / "trace_official_rows.csv", index=False, encoding="utf-8-sig")
+            px = raw[raw["symbol"].isin(trace_symbols)].sort_values("date")
+            px.to_csv(out / "trace_finlab_prices.csv", index=False, encoding="utf-8-sig")
+            summary["trace_symbols"] = {"symbols": list(trace_symbols), "official_rows": int(len(tr))}
+            if mask_path:
+                tc = transfer_check(Path(mask_path), li)
+                tc.to_csv(out / "board_transfer_mask_check.csv", index=False, encoding="utf-8-sig")
+                summary["board_transfers"] = tc.to_dict("records")
+            rec.update(adjustment_rows=len(af), violations=len(ev2))
         if with_5m:
             with st.stage("5m") as rec:
                 fb = first_bars(Path(data_root), pc[scope], log=log)
@@ -527,8 +666,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--data-root", default="")
     ap.add_argument("--with-5m", action="store_true")
+    ap.add_argument("--mask", default="", help="quality_mask_symbol_day.parquet for the board-transfer check")
+    ap.add_argument("--trace", default="8101", help="comma-separated symbols to trace through all official rows")
     a = ap.parse_args(argv)
-    out = run(Path(a.dataset_root), Path(a.out_dir), Path(a.data_root) if a.data_root else None, a.with_5m)
+    out = run(Path(a.dataset_root), Path(a.out_dir), Path(a.data_root) if a.data_root else None, a.with_5m,
+              Path(a.mask) if a.mask else None, tuple(x for x in a.trace.split(",") if x))
     print("written:", out)
     print((out / "summary.json").read_text(encoding="utf-8"))
     return 0
