@@ -125,7 +125,7 @@
   },
   "timing": {
     "bar_available_at": "bar_start + 5 minutes; 13:30 closing-call bar after the 13:30 match",
-    "resampled_bar_available_at": "end of the last constituent 5m bar",
+    "resampled_bar_available_at": "bucket_end = end of the last EXPECTED 5m slot of the bucket (never the last real bar, bar_end); CLOSE_AUCTION separate, after the 13:30 match; see docs/RESEARCH_REPO_INTERFACE.md section 2.2",
     "mask_known_at": "trade date 20:00 Asia/Taipei",
     "universe_selection_may_use": [
       "prev_official_total_shares",
