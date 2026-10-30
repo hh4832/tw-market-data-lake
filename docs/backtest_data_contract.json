@@ -1,55 +1,292 @@
 {
   "contract": "tw-market-data-lake 5m backtest data contract",
-  "version": "1.0.0-draft",
-  "status": "pending_review",
+  "version": "1.1.0-draft",
+  "status": "pending_review (B2 revisions M1-M8)",
   "mask_file": "quality_mask_symbol_day.parquet",
-  "key": ["symbol", "date"],
+  "key": [
+    "symbol",
+    "date"
+  ],
   "unknown_is_true": false,
   "tiers": {
-    "LEVEL_A_STRICT": {"column": "level_A_strict", "use": "robustness_control"},
-    "LEVEL_B_PRICE_GATE": {"column": "level_B_price_gate", "use": "primary_price_research"},
-    "VOLUME_STRICT": {"column": "volume_strict", "use": "intraday_volume_research"},
-    "EXPLORATORY_ONLY": {"column": "research_tier", "value": "EXPLORATORY_ONLY", "use": "exploration_only"},
-    "ISOLATE": {"column": "research_tier", "value": "ISOLATE", "use": "exclude_or_model_separately"}
+    "LEVEL_A_STRICT": {
+      "column": "level_A_strict",
+      "use": "robustness_control"
+    },
+    "LEVEL_B_PRICE_GATE": {
+      "column": "level_B_price_gate",
+      "use": "primary_price_research"
+    },
+    "VOLUME_STRICT": {
+      "column": "volume_strict",
+      "use": "intraday_volume_research"
+    },
+    "EXPLORATORY_ONLY": {
+      "column": "research_tier",
+      "value": "EXPLORATORY_ONLY",
+      "use": "exploration_only"
+    },
+    "ISOLATE": {
+      "column": "research_tier",
+      "value": "ISOLATE",
+      "use": "exclude_or_model_separately"
+    }
   },
   "columns": {
-    "gap_evidence_status": ["NONE_MISSING", "NO_BARS", "VERIFIED_CANDIDATE_ACCEPTED_FOR_RESEARCH",
-                            "CANDIDATE_NO_BOARD_LOT_TRADE", "DAY_LEVEL_MISSING_VOLUME",
-                            "UNRESOLVED_QUARANTINED_EXCHANGE_DATE", "UNRESOLVED_ANOMALY", "UNRESOLVED_VOLUME_EXCESS",
-                            "UNRESOLVED_NO_OFFICIAL_RECORD", "UNIT_UNVERIFIED_EXCLUDED", "SPECIAL_SESSION_NOT_EVALUATED"],
-    "price_range_match": ["TRUE", "FALSE", "UNKNOWN"],
-    "open_match": ["TRUE", "FALSE", "UNKNOWN"],
-    "close_match": ["TRUE", "FALSE", "UNKNOWN"],
-    "price_quality_status": ["PASS", "RANGE_ONLY", "FAIL_RANGE", "UNKNOWN"],
-    "volume_reconciliation_status": ["EXACT", "WITHIN_ONE_LOT", "SHORTFALL_WHOLE_LOTS", "OVERCOUNT",
-                                     "RESIDUAL_NOT_WHOLE_LOT", "IDENTITY_UNVERIFIED", "QUARANTINED_DATE",
-                                     "NOT_EVALUATED"],
+    "gap_evidence_status": [
+      "NONE_MISSING",
+      "NO_BARS",
+      "VERIFIED_CANDIDATE_ACCEPTED_FOR_RESEARCH",
+      "CANDIDATE_NO_BOARD_LOT_TRADE",
+      "DAY_LEVEL_MISSING_VOLUME",
+      "DAY_LEVEL_MISSING_VOLUME_REFETCH_CONSISTENT_ONLY",
+      "UNRESOLVED_QUARANTINED_EXCHANGE_DATE",
+      "UNRESOLVED_ANOMALY",
+      "UNRESOLVED_VOLUME_EXCESS",
+      "UNRESOLVED_NO_OFFICIAL_RECORD",
+      "UNIT_UNVERIFIED_EXCLUDED",
+      "SPECIAL_SESSION_NOT_EVALUATED"
+    ],
+    "price_range_match": [
+      "TRUE",
+      "FALSE",
+      "UNKNOWN"
+    ],
+    "open_match": [
+      "TRUE",
+      "FALSE",
+      "UNKNOWN"
+    ],
+    "close_match": [
+      "TRUE",
+      "FALSE",
+      "UNKNOWN"
+    ],
+    "price_quality_status": [
+      "PASS",
+      "RANGE_ONLY",
+      "FAIL_RANGE",
+      "UNKNOWN"
+    ],
+    "volume_reconciliation_status": [
+      "EXACT",
+      "WITHIN_ONE_LOT",
+      "SHORTFALL_WHOLE_LOTS",
+      "OVERCOUNT",
+      "RESIDUAL_NOT_WHOLE_LOT",
+      "IDENTITY_UNVERIFIED",
+      "QUARANTINED_DATE",
+      "NOT_EVALUATED"
+    ],
     "intraday_volume_shortfall_ratio": "float: (official regular - stored 5m) / official regular when short by whole lots; 0 when EXACT/WITHIN_ONE_LOT; NaN unknown",
     "intraday_volume_overcount": "float shares: stored 5m - official regular when positive; 0 otherwise; NaN unknown",
-    "session_type": ["normal_template", "special_auction_or_halt", "regime_unknown"],
+    "session_type": [
+      "normal_template",
+      "special_auction_or_halt",
+      "regime_unknown"
+    ],
     "has_special_auction": "bool",
     "can_use_for_price_backtest": "bool",
     "can_use_for_volume_backtest": "bool",
     "exclusion_reason": "first failing rule for the price backtest; empty when usable",
     "evidence_version": "string",
-    "source_manifest_sequence": "fubon_5m published seq"
+    "source_manifest_sequence": "fubon_5m published seq",
+    "reference_completeness": [
+      "COMPLETE",
+      "REFETCH_CONSISTENT",
+      "INCOMPLETE"
+    ]
   },
   "slot_types": {
-    "REAL_BAR": {"executable": true, "indicator_input": true},
-    "NO_TRADE_INTERVAL_EVIDENCED": {"executable": false, "indicator_input": "volume=0; price only as flagged derived value"},
-    "NO_TRADE_INTERVAL_CANDIDATE": {"executable": false, "indicator_input": "exploratory only"},
-    "SOURCE_MISSING_INTERVAL": {"executable": false, "indicator_input": false},
-    "RESEARCH_DERIVED_PRICE": {"executable": false, "indicator_input": "flagged derived field only"},
-    "EXECUTABLE_SLOT": {"definition": "REAL_BAR with volume > 0 on a can_use_for_price_backtest symbol-day"}
+    "REAL_BAR": {
+      "executable": true,
+      "indicator_input": true
+    },
+    "NO_TRADE_INTERVAL_ACCEPTED_FOR_RESEARCH": {
+      "executable": false,
+      "indicator_input": "volume=0 and a flagged research-derived price; conditional, not per-bar proof",
+      "source": "missing bar on a VERIFIED_CANDIDATE_ACCEPTED_FOR_RESEARCH symbol-day"
+    },
+    "NO_TRADE_INTERVAL_CANDIDATE": {
+      "executable": false,
+      "indicator_input": "exploratory only"
+    },
+    "SOURCE_MISSING_INTERVAL": {
+      "executable": false,
+      "indicator_input": false
+    },
+    "RESEARCH_DERIVED_PRICE": {
+      "executable": false,
+      "indicator_input": "flagged derived field only"
+    },
+    "EXECUTABLE_SLOT": {
+      "definition": "REAL_BAR with volume > 0 on a can_use_for_price_backtest symbol-day"
+    }
   },
   "timing": {
     "bar_available_at": "bar_start + 5 minutes; 13:30 closing-call bar after the 13:30 match",
     "resampled_bar_available_at": "end of the last constituent 5m bar",
     "mask_known_at": "trade date 20:00 Asia/Taipei",
-    "universe_selection_may_use": ["prev_official_total_shares", "masks of prev_trading_date or earlier"],
-    "same_day_mask_use": "data-availability exclusion only; report excluded trades",
-    "fill": "next EXECUTABLE_SLOT open + slippage + fees + tax; never the signal bar's own close"
+    "universe_selection_may_use": [
+      "prev_official_total_shares",
+      "masks of prev_trading_date or earlier"
+    ],
+    "same_day_mask_use": "post-hoc data-availability exclusion only (Level B is a post-hoc mask); never universe selection, ranking or signal input; report INVALIDATED trades",
+    "fill": "next EXECUTABLE_SLOT open + slippage + fees + tax; never the signal bar's own close",
+    "signal_may_use": [
+      "bars available at signal time",
+      "masks of prev_trading_date or earlier"
+    ]
   },
   "forward_fill_as_trade": false,
-  "official_open_close_override": "when open_match/close_match is FALSE use the official daily open/close"
+  "applies_to": {
+    "formal_mask": "quality_mask_20261030_014633_fbec159 (quality 1.0.0, unchanged)",
+    "mask_sha256": "9ec79fe02412c25dae56572a334c167c168e374a438dd71e9f4dc0e138ac6863",
+    "fubon_5m_seq": 68,
+    "note": "v1.1.0 changes wording/semantics only for the formal 1.0.0 mask; see errata_v1_0_0"
+  },
+  "status_glossary": {
+    "VERIFIED_CANDIDATE_ACCEPTED_FOR_RESEARCH": {
+      "meaning": "conditional research acceptance of a symbol-day: VERIFIED = the exchange-date and rule evidence were accepted; CANDIDATE = the missing bars are not proven trade-free one by one",
+      "per_bar_proof": false,
+      "maps_to_slot_type": "NO_TRADE_INTERVAL_ACCEPTED_FOR_RESEARCH",
+      "never_maps_to": "NO_TRADE_INTERVAL_EVIDENCED",
+      "conditions": [
+        "P1-P8 in acceptance_rule_v2.json",
+        "0 <= residual < 1 lot (formal: |residual| < 1 share)",
+        "official high/low equal stored range",
+        "exchange-date not quarantined"
+      ]
+    },
+    "CANDIDATE_NO_BOARD_LOT_TRADE": {
+      "meaning": "volume bound only; range not corroborated",
+      "per_bar_proof": false,
+      "use": "exploratory"
+    },
+    "DAY_LEVEL_MISSING_VOLUME": {
+      "meaning": "whole-lot shortfall on a reference-complete date; slot unknown",
+      "use": "exploratory"
+    },
+    "DAY_LEVEL_MISSING_VOLUME_REFETCH_CONSISTENT_ONLY": {
+      "meaning": "as DAY_LEVEL but the fixed-price reference was only re-fetched consistently (quality >= 1.1.0)",
+      "use": "exploratory"
+    },
+    "REFETCH_CONSISTENT": {
+      "meaning": "re-request returned HTTP 200 with identical values; shows reproducibility, not completeness"
+    },
+    "REFERENCE_COMPLETE": {
+      "meaning": "report proven complete by an independent source or official notice; value COMPLETE in reference_completeness"
+    }
+  },
+  "slot_types_reserved": {
+    "NO_TRADE_INTERVAL_EVIDENCED": "reserved for per-bar evidence (e.g. official tick or 5m data); no current status maps to it"
+  },
+  "level_B": {
+    "nature": "post-hoc data-availability mask",
+    "primary_for": "single-day (intraday) price research only",
+    "multi_day_holding": "not formal until B3 corporate actions, B4 price limits / tick sizes, B5 universe completeness are resolved",
+    "invalidated_trades": {
+      "definition": "trade a strategy would have taken on a symbol-day excluded by the same-day mask",
+      "report": [
+        "count",
+        "share of all candidate trades",
+        "exposure (notional, holding time)",
+        "characteristics vs retained (liquidity, year, exchange)",
+        "sensitivity: results with INVALIDATED trades excluded vs filled by a conservative proxy"
+      ]
+    }
+  },
+  "volume": {
+    "volume_strict_requires": "EXACT",
+    "volume_reliable_semantics": "boolean = (volume_reconciliation_status == EXACT); unchanged",
+    "volume_tolerance_exploratory": {
+      "definition": "derived by the research repo: status in {EXACT, WITHIN_ONE_LOT, SHORTFALL_WHOLE_LOTS} and intraday_volume_shortfall_ratio <= 0.005",
+      "formal_use": false,
+      "use": "exploration flag and sensitivity analysis only",
+      "mask_column": false
+    }
+  },
+  "official_daily": {
+    "view": "daily_official",
+    "may_overwrite_5m_ohlc": false,
+    "source": "reference/official_volume/v1 raw responses",
+    "known_at": "trade date after official publication (contract assumes 20:00 Asia/Taipei)",
+    "use": "daily-frequency research only",
+    "intraday_fill": "never; RANGE_ONLY symbol-days are not used for formal intraday fills"
+  },
+  "quarantine_frozen_v1": {
+    "policy": "frozen; whole exchange-date excluded; un-quarantine of any symbol or date only in a new version with independent evidence and a separate sign-off; never edited in place",
+    "exchange_dates": [
+      {
+        "exchange": "TPEX",
+        "date": "2023-08-24"
+      },
+      {
+        "exchange": "TPEX",
+        "date": "2026-01-27"
+      },
+      {
+        "exchange": "TPEX",
+        "date": "2026-01-29"
+      },
+      {
+        "exchange": "TPEX",
+        "date": "2026-05-12"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2023-05-25"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2023-07-19"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2023-08-24"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2023-08-28"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2023-12-25"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2024-02-02"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2026-01-27"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2026-01-29"
+      },
+      {
+        "exchange": "TWSE",
+        "date": "2026-05-12"
+      }
+    ]
+  },
+  "known_limitations": {
+    "rule_v2_counterexamples": "tests/test_rule_v2_counterexamples.py",
+    "items": [
+      "missing 1-lot trade offset by a 1-lot double count in another bar: r=0, high/low unchanged",
+      "missing 1-lot trade offset by a component overstated by 1 lot: r=0",
+      "hidden trade priced inside the stored high/low passes the range gate",
+      "first bar / 13:30 closing call: caught only when open/close price differs",
+      "adjacent-day attribution: a moved lot can cancel a missing lot on the next day",
+      "disposal sessions and non-standard units are excluded, not evaluated",
+      "negative residuals cluster on few exchange-dates: no binomial / rule-of-three bound"
+    ]
+  },
+  "errata_v1_0_0": {
+    "reference_completeness": "in the formal 1.0.0 mask, value COMPLETE on TWSE 2024-02-05, 2025-04-07, 2025-04-10 means REFETCH_CONSISTENT (from reference_completeness_cleared.csv 'cleared'), not REFERENCE_COMPLETE",
+    "gap_evidence_status": "DAY_LEVEL_MISSING_VOLUME on those three dates reads as DAY_LEVEL_MISSING_VOLUME_REFETCH_CONSISTENT_ONLY",
+    "flags_affected": false,
+    "acceptance_rule_v2_json": "P1 'independent source' and P3 'rule-of-three 95 % upper bound' are withdrawn; see acceptance_premises in quality >= 1.1.0"
+  }
 }

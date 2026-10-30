@@ -73,5 +73,7 @@ def test_reference_fix_uses_refetch_evidence():
     ref = pd.DataFrame([{"date": "2025-04-10", "report": "BFT41U", "new_http": 200, "symbols_value_differs": 0,
                          "old_symbols": 7105, "new_symbols": 7105}])
     fixed, log = Q.reference_fix(edq, ref)
-    assert list(fixed["reference_completeness"]) == ["COMPLETE", "INCOMPLETE"]
-    assert len(log) == 1
+    # M6: a consistent re-fetch is REFETCH_CONSISTENT, never REFERENCE_COMPLETE
+    assert list(fixed["reference_completeness"]) == [Q.REFETCH_CONSISTENT, "INCOMPLETE"]
+    assert len(log) == 1 and log.iloc[0]["evidence_status"] == Q.REFETCH_CONSISTENT
+    assert not bool(log.iloc[0]["reference_complete"])

@@ -37,10 +37,22 @@ from ..run_context import git_sha
 from .stagelog import Stages
 from .volume_recon import TRADING_UNIT
 
-QUALITY_VERSION = "1.0.0"
+QUALITY_VERSION = "1.1.0"
+# VERIFIED = evidence/rule acceptance; CANDIDATE = not proven per trade. Conditional research acceptance,
+# never a per-bar NO_TRADE_INTERVAL_EVIDENCED (see docs/BACKTEST_DATA_CONTRACT.md section 0).
 ACCEPTED = "VERIFIED_CANDIDATE_ACCEPTED_FOR_RESEARCH"
 NO_TRADE = "CANDIDATE_NO_BOARD_LOT_TRADE"
 DAY_LEVEL = "DAY_LEVEL_MISSING_VOLUME"
+# whole-lot shortfall whose fixed-price reference was only re-fetched consistently (not proven complete)
+DAY_LEVEL_REFETCH = "DAY_LEVEL_MISSING_VOLUME_REFETCH_CONSISTENT_ONLY"
+REFERENCE_COMPLETE = "COMPLETE"
+REFETCH_CONSISTENT = "REFETCH_CONSISTENT"
+# Frozen at quality v1.0.0 (13 exchange-dates). Always quarantined; un-quarantining any symbol or date needs a
+# new version, independent evidence and a separate sign-off. Never shrink this list in place.
+QUARANTINE_FROZEN_V1 = frozenset(
+    [("TPEX", d) for d in ("2023-08-24", "2026-01-27", "2026-01-29", "2026-05-12")]
+    + [("TWSE", d) for d in ("2023-05-25", "2023-07-19", "2023-08-24", "2023-08-28", "2023-12-25", "2024-02-02",
+                             "2026-01-27", "2026-01-29", "2026-05-12")])
 
 
 def _tri(v) -> pd.Series:
@@ -59,9 +71,12 @@ def _sha(p: Path) -> str:
 
 
 def reference_fix(edq: pd.DataFrame, refetch: pd.DataFrame | None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Coverage flags proven wrong by an independent re-request (same values, HTTP 200) are cleared."""
+    """Coverage flags whose re-request returned the same values (HTTP 200) become REFETCH_CONSISTENT.
+
+    A consistent re-fetch shows the response is reproducible, not that the report is complete, so the
+    exchange-date is NOT promoted to COMPLETE (quality >= 1.1.0; v1.0.0 wrote COMPLETE, see contract errata)."""
     edq = edq.copy()
-    log = pd.DataFrame(columns=["exchange", "date", "report", "cleared"])
+    log = pd.DataFrame(columns=["exchange", "date", "report", "evidence_status", "reference_complete"])
     if refetch is None or edq.empty:
         return edq, log
     ok = refetch[(refetch["new_http"] == 200) & (refetch["symbols_value_differs"] == 0)
@@ -71,9 +86,9 @@ def reference_fix(edq: pd.DataFrame, refetch: pd.DataFrame | None) -> tuple[pd.D
         reps = [x for x in str(r["incomplete_reports"]).split("|") if x]
         confirmed = [x for x in reps if ((ok["date"] == r["date"]) & (ok["report"] == x)).any()]
         if confirmed and len(confirmed) == len(reps):
-            edq.at[i, "reference_completeness"] = "COMPLETE"
-            edq.at[i, "incomplete_reports"] = ""
-            rows.append({"exchange": r["exchange"], "date": r["date"], "report": "|".join(confirmed), "cleared": True})
+            edq.at[i, "reference_completeness"] = REFETCH_CONSISTENT
+            rows.append({"exchange": r["exchange"], "date": r["date"], "report": "|".join(confirmed),
+                         "evidence_status": REFETCH_CONSISTENT, "reference_complete": False})
     return edq, pd.DataFrame(rows, columns=log.columns)
 
 
@@ -81,11 +96,12 @@ def build_mask(sdq: pd.DataFrame, edq: pd.DataFrame, price: pd.DataFrame | None,
                evidence_version: str) -> pd.DataFrame:
     s = sdq.copy()
     s = s.merge(edq[["exchange", "date", "reference_completeness"]], on=["exchange", "date"], how="left")
-    quarantined = s["identity_status"] == "OVERCOUNT_PRESENT"
+    frozen = pd.Series([(e, d) in QUARANTINE_FROZEN_V1 for e, d in zip(s["exchange"], s["date"])], index=s.index)
+    quarantined = (s["identity_status"] == "OVERCOUNT_PRESENT") | frozen
     r = s["residual_shares"]
     unit_ok = s["missing_bar_evidence_status"].ne("UNIT_UNVERIFIED_EXCLUDED") & s["official_total"].notna()
     normal = s["session_type"] == "normal_template"
-    ident_ok = s["identity_status"].isin(["VERIFIED", "NO_OVERCOUNT"])
+    ident_ok = s["identity_status"].isin(["VERIFIED", "NO_OVERCOUNT"]) & ~frozen
     # --- price dimensions
     if price is not None:
         p = price[["symbol", "date", "open_match", "high_match", "low_match", "close_match"]]
@@ -113,11 +129,13 @@ def build_mask(sdq: pd.DataFrame, edq: pd.DataFrame, price: pd.DataFrame | None,
          s["missing_bar_evidence_status"] == "UNIT_UNVERIFIED_EXCLUDED", s["official_total"].isna(),
          quarantined, accepted,
          ident_ok & (r >= 0) & (r < TRADING_UNIT),
-         ident_ok & whole & (s["reference_completeness"] == "COMPLETE"),
+         ident_ok & whole & (s["reference_completeness"] == REFERENCE_COMPLETE),
+         ident_ok & whole & (s["reference_completeness"] == REFETCH_CONSISTENT),
          ident_ok & (r <= -1)],
         ["SPECIAL_SESSION_NOT_EVALUATED", "NONE_MISSING", "NO_BARS",
          "UNIT_UNVERIFIED_EXCLUDED", "UNRESOLVED_NO_OFFICIAL_RECORD",
-         "UNRESOLVED_QUARANTINED_EXCHANGE_DATE", ACCEPTED, NO_TRADE, DAY_LEVEL, "UNRESOLVED_VOLUME_EXCESS"],
+         "UNRESOLVED_QUARANTINED_EXCHANGE_DATE", ACCEPTED, NO_TRADE, DAY_LEVEL, DAY_LEVEL_REFETCH,
+         "UNRESOLVED_VOLUME_EXCESS"],
         default="UNRESOLVED_ANOMALY")
     # --- volume dimension
     s["volume_reconciliation_status"] = np.select(
@@ -173,6 +191,18 @@ def build_mask(sdq: pd.DataFrame, edq: pd.DataFrame, price: pd.DataFrame | None,
     return s[cols]
 
 
+def negative_residual_clustering(edq: pd.DataFrame) -> dict:
+    """How concentrated negative residuals are; concentration rules out an independent-trials bound."""
+    neg = edq["n_negative"].fillna(0)
+    n = float(neg.sum())
+    q = edq["identity_status"] == "OVERCOUNT_PRESENT"
+    return {"negative_symbol_days": int(n), "exchange_dates_with_negative": int((neg > 0).sum()),
+            "exchange_dates_total": int(len(edq)),
+            "share_on_quarantined_dates": float(neg[q].sum() / n) if n else 0.0,
+            "max_on_one_exchange_date": int(neg.max()) if len(neg) else 0,
+            "independent_trials_bound_valid": False}
+
+
 def acceptance_premises(sdq: pd.DataFrame, edq: pd.DataFrame, price_xt: pd.DataFrame | None,
                         fubon: pd.DataFrame | None) -> dict:
     cd = edq["n_complete_days"].fillna(0).sum()
@@ -184,41 +214,59 @@ def acceptance_premises(sdq: pd.DataFrame, edq: pd.DataFrame, price_xt: pd.DataF
             "premise": "official daily total = regular session (incl. 13:30 closing call) + fixed-price + odd-lot "
                        "(intraday, after-hours) + block; auctions/tenders excluded",
             "evidence": "TWSE MI_INDEX note; identity exact on complete days of verified exchange-dates (>= 99 %); "
-                        "FinLab daily volume equals the official total on 100 % of complete days (independent source)",
+                        "FinLab daily volume equals the official total on 100 % of complete days (FinLab is a "
+                        "redistribution of the same exchange data, not independent truth)",
+            "uncertainty": "composition notes can change; a component missing from both the official total and "
+                           "our component list would not be detected",
             "decision": "accepted"},
         "P2_units": {
             "premise": "components converted to shares correctly; board lot = 1,000 shares",
             "evidence": "unit decided per value (header, amount/(qty x price), report notes) and recorded; foreign-"
                         "currency ETFs (lot = 100 units) excluded; residuals on verified dates are 0, not x1000 off",
+            "uncertainty": "non-standard trading units other than the excluded ETFs are only checked where a "
+                           "unit decision was recorded; others are UNIT_UNVERIFIED_EXCLUDED",
             "decision": "accepted (foreign-currency ETFs excluded)"},
         "P3_no_overcount_in_stored_bars": {
             "premise": "stored 5m volume never exceeds the true regular volume (no duplicate counting)",
             "evidence": f"negative residuals on {int(neg)} of {int(cd)} complete days; {int(neg_outside)} of "
-                        f"{int(n_out)} outside the quarantined exchange-dates (rule-of-three 95 % upper bound "
-                        f"{3 / max(n_out, 1):.2e} per symbol-day when 0)",
+                        f"{int(n_out)} outside the quarantined exchange-dates",
+            "uncertainty": "negatives are clustered on a few exchange-dates (date-common provider errors), so "
+                           "symbol-days are not independent trials and no binomial / rule-of-three bound is "
+                           "claimed; an over-count smaller than any detectable negative residual is not excluded",
+            "clustering": negative_residual_clustering(edq),
             "decision": "accepted outside quarantined exchange-dates; rejected on them"},
         "P4_day_attribution": {
             "premise": "trades are attributed to the right trading day by the provider",
             "evidence": "Fubon D candle equals the official total on every cross-checked symbol-day; adjacent-day "
                         "opposite residuals are rare and confined to quarantined dates",
+            "uncertainty": "a trade moved to an adjacent day can be masked if that day also misses an equal "
+                           "board-lot volume (r = 0 on both); only checked where cross-checked",
             "decision": "accepted outside quarantined exchange-dates"},
         "P5_no_cancellation": {
             "premise": "a residual of exactly 0 cannot hide trades offset by an over-count on the same symbol-day",
             "evidence": "offset needs an over-count (P3); over-count is only observed on quarantined dates",
+            "uncertainty": "counterexamples (tests/test_rule_v2_counterexamples.py): a missing 1,000-share trade "
+                           "offset by a 1,000-share double count in another bar, or by an overstated component, "
+                           "gives r = 0 and unchanged official high/low",
             "decision": "accepted with P3; not a per-bar verification"},
         "P6_components_not_overstated": {
             "premise": "measured components do not exceed the true components (else residual is pushed down)",
             "evidence": "over-subtraction would produce negative residuals on complete days, covered by P3; "
                         "re-parse of raw responses reproduces the component tables exactly; re-request of the "
-                        "flagged BFT41U dates returns identical values",
+                        "flagged BFT41U dates returns identical values (REFETCH_CONSISTENT, not proof of "
+                        "completeness)",
+            "uncertainty": "a component overstated by exactly the hidden board-lot volume yields r = 0",
             "decision": "accepted"},
         "P7_regime": {
             "premise": "normal continuous session + 13:30 closing call; disposal call-auction days are different",
             "evidence": "special sessions are not evaluated (SPECIAL_SESSION_NOT_EVALUATED)",
+            "uncertainty": "first bar of the open and the 13:30 closing call are matched by open/close checks "
+                           "only when the hidden trade price differs from the stored one",
             "decision": "scope restricted to normal sessions"},
         "P8_price_corroboration": {
             "premise": "a hidden trade outside the stored range would change the official high/low",
             "evidence": "required per symbol-day: official high and low equal the stored range",
+            "uncertainty": "a hidden trade priced inside the stored high/low range passes this gate",
             "decision": "required for acceptance"},
     }
     if price_xt is not None:
@@ -230,8 +278,10 @@ def acceptance_premises(sdq: pd.DataFrame, edq: pd.DataFrame, price_xt: pd.DataF
             "symbol_days": int(len(f)), "api_5m_equals_stored": float(eq(f["api_5m_shares"], f["stored_5m_shares"])),
             "api_D_equals_official_total": float(eq(f["api_D_shares"], f["official_total"])),
             "api_5m_minus_official_regular_min": float((f["api_5m_shares"] - f["official_regular"]).min())}
-    prem["statement"] = ("Acceptance is a symbol-day statement derived from official daily volume, not an observation "
-                         "of each missing bar. Statistical agreement is not per-bar verification.")
+    prem["statement"] = ("VERIFIED_CANDIDATE_ACCEPTED_FOR_RESEARCH is a conditional research acceptance of a "
+                         "symbol-day derived from official daily volume and range, not an observation of each "
+                         "missing bar; it never maps to NO_TRADE_INTERVAL_EVIDENCED. Statistical agreement is not "
+                         "per-bar verification.")
     return prem
 
 
@@ -291,8 +341,8 @@ def run(ledger_dir: Path, eligibility_dir: Path, out_root: Path, price_check_dir
         rec["symbol_days"] = int(len(sdq))
     with st.stage("reference_fix") as rec:
         edq2, cleared = reference_fix(edq, refetch)
-        cleared.to_csv(out / "reference_completeness_cleared.csv", index=False, encoding="utf-8-sig")
-        rec["cleared"] = int(len(cleared))
+        cleared.to_csv(out / "reference_refetch_consistency.csv", index=False, encoding="utf-8-sig")
+        rec["refetch_consistent"] = int(len(cleared))
     ev = (f"quality_v{QUALITY_VERSION}+eligibility_{emf.get('code_commit', '')[:7]}"
           f"+recon_{emf.get('inputs', {}).get('reconciliation', {}).get('git_sha', '')[:7]}"
           f"+price_{Path(price_check_dir).name if price_check_dir else 'none'}")
@@ -301,7 +351,10 @@ def run(ledger_dir: Path, eligibility_dir: Path, out_root: Path, price_check_dir
         mask.to_parquet(out / "quality_mask_symbol_day.parquet", index=False)
         rec["rows"] = int(len(mask))
     with st.stage("quarantine_and_anomalies") as rec:
-        q = edq2[edq2["identity_status"] == "OVERCOUNT_PRESENT"].copy()
+        fz = pd.Series([(e, d) in QUARANTINE_FROZEN_V1 for e, d in zip(edq2["exchange"], edq2["date"])],
+                       index=edq2.index)
+        q = edq2[(edq2["identity_status"] == "OVERCOUNT_PRESENT") | fz].copy()
+        q["frozen_list_v1"] = fz[q.index]
         qs = mask[mask["gap_evidence_status"] == "UNRESOLVED_QUARANTINED_EXCHANGE_DATE"] \
             .groupby(["exchange", "date"]).agg(quarantined_symbol_days=("symbol", "size"),
                                                quarantined_missing_slots=("missing_bar_count", "sum")).reset_index()
