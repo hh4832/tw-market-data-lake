@@ -416,7 +416,7 @@
 
   不符合的維持 `CANDIDATE` 或 `UNRESOLVED`。這是個股日層級的推論，不是逐根觀察。各前提與證據列在 `acceptance_rule_v2.json`。
 - **隔離**：完整日有負殘差的交易所日期整天隔離。同日其他股票（包括 K 棒完整的）不會升級為可信。
-- **BFT41U 完整度修正**：列數偏低的報表，若獨立重抓結果 HTTP 200、股票數相同、數值 0 差異，即改判為完整，並記錄在 `reference_completeness_cleared.csv`。
+- **BFT41U 重抓一致**：列數偏低的報表，若獨立重抓結果 HTTP 200、股票數相同、數值 0 差異，quality 1.0.0 記為「cleared」（`reference_completeness_cleared.csv`）。B2 修訂後應讀為 `REFETCH_CONSISTENT`，即一致性異常已釐清，不代表報表完整（見第 17 節）。
 - **欄位、層級與防前視規則**：見 `docs/BACKTEST_DATA_CONTRACT.md`。
 
 ## 16. B1 整合驗收（`tw_lake.audit.integration_check`）
@@ -436,3 +436,24 @@
 - 抽查可用股票日，K 棒數與 5 分 K 成交量和原始分區一致。
 
 以上全部通過才判定 PASS，exit code 為 0。
+
+## 17. B2 技術審查修訂（M1–M8，契約 v1.1.0，quality 程式 1.1.0）
+
+依 GPT B2 審查第 14.8 節修改。B1 已 PASS，本次不重跑：
+
+- 未重新下載或重算全期資料；
+- 未修改 raw、manifest、published pointer、seq 68，也未修改正式遮罩 `quality_mask_20261030_014633_fbec159`。
+
+| 項目 | 檔案 | 改了什麼 | 欄位或輸出變更 |
+|---|---|---|---|
+| M1 | `docs/BACKTEST_DATA_CONTRACT.md` 第 0、3、7 節；`backtest_data_contract.json` `status_glossary`、`known_limitations` | 狀態詞彙：條件式研究接受，不是逐根證明；格點型態改名為 `NO_TRADE_INTERVAL_ACCEPTED_FOR_RESEARCH`；P1–P8 補上不確定性；列出五類反例 | 契約文字；`acceptance_rule_v2.json` 每個前提新增 `uncertainty`（僅 quality ≥ 1.1.0 新執行） |
+| M1 反例 | `tests/test_rule_v2_counterexamples.py` | 合成測試，固定規則 v2 會接受的反例：抵銷、成分高估、區間內、開盤、13:30、鄰日、處置、單位、負殘差集中 | 無 |
+| M2 | `quality_mask.QUARANTINE_FROZEN_V1`；契約第 5.1 節、`quarantine_frozen_v1` | 凍結 13 個交易所日期；即使將來判為 VERIFIED 也維持隔離 | 正式資料：無（集合相同）。`quarantine_exchange_dates.csv` 新增 `frozen_list_v1` 欄（僅新執行） |
+| M3 | 契約第 2.1 節、`volume` | Volume Strict 只接受 EXACT；`volume_tolerance_exploratory` 只能由研究 repo 衍生作敏感度分析 | 無 |
+| M4 | 契約第 4.4 節、`official_daily` | 刪除盤中以官方開收盤覆寫；官方日 K 只作 `daily_official` 日頻 view；RANGE_ONLY 不得盤中成交 | JSON 刪除 `official_open_close_override` |
+| M5 | 契約第 4.2、6 節、`level_B` | Level B 是事後可用性遮罩；選股與訊號不得看當日遮罩；揭露 INVALIDATED 偏差；多日持有待 B3–B5 | 無 |
+| M6 | `quality_mask.reference_fix`、`build_mask`；契約第 8、9 節 | `REFETCH_CONSISTENT` 與 `REFERENCE_COMPLETE` 分開；新狀態 `DAY_LEVEL_MISSING_VOLUME_REFETCH_CONSISTENT_ONLY`；附 1.0.0 勘誤 | 僅新執行：`reference_completeness` 新值、`gap_evidence_status` 新值，紀錄檔改名為 `reference_refetch_consistency.csv`。可交易旗標與 tier 不變（有測試保證） |
+| M7 | `docs/RESEARCH_REPO_INTERFACE.md` | 鎖定 seq、SHA、evidence_version；30 分時間桶（13:30 獨立）；合成成交場景 S1–S8；fail-closed 規則 | 無 |
+| M8 | 本節 | 變更對照、風險清單 | 無 |
+
+`QUALITY_VERSION` 改為 1.1.0。若要以 1.1.0 產生新遮罩，必須另立資料夾並另行驗收，不覆寫 1.0.0。
