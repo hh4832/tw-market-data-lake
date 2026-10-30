@@ -21,7 +21,7 @@ ISIN_HTML = ("<table><tr><td>有價證券代號及名稱</td><td>國際證券辨
 
 
 def fake_getter(calls):
-    def get(url, params):
+    def get(url, params, *_timeout):
         calls.append((url, dict(params)))
         if "TWT49U" in url:
             body = T49 if params.get("startDate", "").startswith("202506") else EMPTY
@@ -30,6 +30,12 @@ def fake_getter(calls):
             return 200, ISIN_HTML, "text/html", url
         if "broken" in url:
             return 500, b"err", "", url
+        if "paramerr" in url:
+            return 200, json.dumps({"stat": "參數輸入錯誤"}, ensure_ascii=False).encode(), "application/json", url
+        if "deListed" in url:
+            return 200, json.dumps({"stat": "ok", "tables": [{"title": "t", "fields": ["終止上櫃日期", "代號"],
+                                    "data": [[f"{params['date']}/03/01", "1234"]]}]}, ensure_ascii=False).encode(), \
+                "application/json", url
         return 200, b"<html>not found</html>", "text/html", url
     return get
 
@@ -82,14 +88,39 @@ def test_fetch_resumes_and_skips_done(tmp_path):
     assert st.iloc[0]["remaining"] == 0
 
 
-def test_fetch_failure_is_not_marked_done_and_stops(tmp_path, monkeypatch):
+def test_failing_report_is_skipped_others_continue(tmp_path, monkeypatch):
     bad = CA.Endpoint("X_broken", "TWSE", "test", "https://x/broken", CA.R, "range", pace_sec=0)
+    perr = CA.Endpoint("X_paramerr", "TWSE", "test", "https://x/paramerr", CA.R, "range", pace_sec=0)
     monkeypatch.setitem(CA.BY_ID, "X_broken", bad)
+    monkeypatch.setitem(CA.BY_ID, "X_paramerr", perr)
     root = tmp_path / "ref"
-    rec = CA.fetch(root, tmp_path / "w", ["X_broken"], date(2025, 1, 1), date(2025, 12, 31),
-                   getter=fake_getter([]), sleep=lambda *_: None, log=lambda *_: None, today=date(2026, 10, 30))
-    assert not rec["done"] and len(rec["failed"]) == 3 and "failures in a row" in rec["stopped"]
+    rec = CA.fetch(root, tmp_path / "w", ["X_broken", "X_paramerr", "TWSE_TWT49U"], date(2025, 1, 1),
+                   date(2025, 12, 31), getter=fake_getter([]), sleep=lambda *_: None, log=lambda *_: None,
+                   today=date(2026, 10, 30))
+    assert sorted(rec["skipped_reports"]) == ["X_broken", "X_paramerr"]
+    assert sum(1 for f in rec["failed"] if f["report"] == "X_broken") == 3
+    assert sum(1 for d in rec["done"] if d.startswith("TWSE_TWT49U/")) == 12          # same host keeps going
     assert not (CA.shard(root, bad, "2025-01") / "_SUCCESS").exists()
+    assert not (CA.shard(root, perr, "2025-01") / "_SUCCESS").exists()                # parameter error is not data
+
+
+def test_year_and_day_modes(tmp_path):
+    ep = CA.BY_ID["TPEX_deListed_yroc"]
+    p = CA.plan(ep, date(2023, 5, 1), date(2026, 10, 30), date(2026, 10, 30))
+    assert [x[0] for x in p] == ["2023", "2024", "2025", "2026"]
+    assert CA.period_name(ep, "2026", p[-1][2], date(2026, 10, 30)) == "2026_asof_2026-10-30"
+    d = CA.plan(CA.BY_ID["TPEX_chtm"], date(2026, 10, 23), date(2026, 10, 27), date(2026, 10, 30))
+    assert [x[0] for x in d] == ["2026-10-23", "2026-10-26", "2026-10-27"]              # weekdays only
+    calls = []
+    rec = CA.fetch(tmp_path / "ref", tmp_path / "w", ["TPEX_deListed_yroc"], date(2024, 1, 1), date(2025, 12, 31),
+                   getter=fake_getter(calls), sleep=lambda *_: None, log=lambda *_: None, today=date(2026, 10, 30))
+    assert rec["done"] == ["TPEX_deListed_yroc/2024", "TPEX_deListed_yroc/2025"]
+    assert [c[1]["date"] for c in calls] == ["113", "114"] and calls[0][1]["reason"] == "-1"
+
+
+def test_recommended_ids_exist():
+    assert set(CA.RECOMMENDED) <= set(CA.BY_ID)
+    assert len(CA.RECOMMENDED) == len(set(CA.RECOMMENDED))
 
 
 def test_current_month_is_dated(tmp_path):

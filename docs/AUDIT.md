@@ -478,3 +478,25 @@
   - 拒絕寫進任何 lake 資料集或 `official_volume`。
 - **known_at 的保守估計**：區間報表取期末，快照取抓取時間。列內的公告日才是真正的可得時間，留給後續稽核使用。
 - **尚未做**：事件正規化、調整因子、與參考價或 FinLab 因子的核對（計畫第 1.4 節）。這些等正式資料抓完、欄位經過審閱後，另開 PR。
+
+**試抓結果（2026-10-30，`ca_probe_20261030_215933`、`ca_discovery_20261030_215635`）與 v0.2.0 調整**
+
+- 證交所以下報表都有回應表格，欄位如下（2025-06 的列數）：
+  - TWT49U 除權息結果（245 列）：參考價、漲跌停、開盤競價基準。
+  - TWTAUU 減資恢復買賣參考價。
+  - TWTB8U 變更面額恢復買賣參考價。
+  - TWTCAU ETF 分割。
+  - TWTAWU 暫停交易（55 列）。
+  - 終止上市（265 列）。
+  - 新上市（797 列）。
+- TWT48U 與 TWTAVU 會**忽略日期參數**，只回傳目前的預告，因此改成快照。
+- ISIN 上市主檔第一次逾時，已把逾時時間延長到 180 秒。
+- 櫃買舊網站的除權息端點（`exDailyQ_result.php`）可用，欄位含漲跌停與開始交易基準價。
+- 新網站的 action 與表單欄位取自探索時保存的頁面：
+  - `bulletin/exDailyQ`、`revivt`、`pvChgRslt`、`etfSplitRslt`、`etfRvsRslt` 用 `startDate`／`endDate`，格式 YYYY/MM/DD。
+  - `company/deListed` 與 `company/latest` 用 `date=<年>`、`reason=-1`。年份可能是西元或民國，所以兩種寫法都抓。
+  - `afterTrading/chtm`（變更交易、分盤、管理股票、停止交易）一次查一天。
+  - `bulletin/prePost`、`decap`、`sprc` 是目前清單。
+- 預設抓取清單 `recommended` 共 25 個報表。
+- 回應的 stat 若含參數錯誤，不算成功。
+- 某個報表連續失敗 3 次，這次就跳過它，其他報表照常繼續。
