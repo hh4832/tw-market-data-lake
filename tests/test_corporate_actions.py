@@ -150,3 +150,14 @@ def test_parse_flattens_without_interpretation(tmp_path):
     i = lg[lg["report"] == "ISIN_TWSE"]
     assert (i["field"] == "上市日").any() and (i["value"] == "1994/09/05").any()
     assert any(p.name.startswith("wide_TWSE_TWT49U") for p in out.iterdir())
+
+
+def test_status_counts_dated_copies_after_midnight(tmp_path):
+    root = tmp_path / "ref"
+    kw = dict(getter=fake_getter([]), sleep=lambda *_: None, log=lambda *_: None)
+    CA.fetch(root, tmp_path / "w", ["TWSE_TWT49U", "ISIN_TWSE"], date(2026, 9, 1), date(2026, 10, 30),
+             today=date(2026, 10, 30), **kw)
+    st = CA.status(root, ["TWSE_TWT49U", "ISIN_TWSE"], date(2026, 9, 1), date(2026, 10, 31),
+                   today=date(2026, 10, 31)).set_index("report")
+    assert st.at["TWSE_TWT49U", "remaining"] == 0 and st.at["ISIN_TWSE", "remaining"] == 0
+    assert st.at["TWSE_TWT49U", "latest_dated_copy"] == "2026-10_asof_2026-10-30"

@@ -445,8 +445,21 @@ def status(root: Path, ids: list[str], start: date, end: date, today: date | Non
     for i in ids:
         ep = BY_ID[i]
         periods = plan(ep, start, end, today)
-        done = sum(_done(shard(root, ep, period_name(ep, p, b, today))) for p, _a, b in periods)
-        rows.append({"report": i, "periods": len(periods), "done": done, "remaining": len(periods) - done})
+        done, latest = 0, ""
+        for p, _a, b in periods:
+            name = period_name(ep, p, b, today)
+            if name != p or p.startswith("snapshot_"):
+                # unfinished periods / snapshots are kept as dated copies: any finished copy counts as done
+                base = "snapshot_" if p.startswith("snapshot_") else f"{p}_asof_"
+                copies = sorted(d.name.split("=", 1)[1] for d in (Path(root) / "shards" / f"report={i}").glob(
+                    f"period={base}*") if _done(d))
+                if copies:
+                    done += 1
+                    latest = max(latest, copies[-1])
+            elif _done(shard(root, ep, p)):
+                done += 1
+        rows.append({"report": i, "periods": len(periods), "done": done, "remaining": len(periods) - done,
+                     "latest_dated_copy": latest})
     return pd.DataFrame(rows)
 
 
