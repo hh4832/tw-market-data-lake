@@ -71,6 +71,10 @@ def fill_reference(signal_at: datetime, source_bucket: str, days: list[tuple[dat
     return None
 
 
+def _valid_ohlc(bars) -> bool:
+    return all(l <= min(o, c) and h >= max(o, c) and l <= h for o, h, l, c, _ in bars.values())
+
+
 def flat(d: date, slots, px=100.0, vol=1000):
     return {s: (px, px, px, px, vol) for s in slots}
 
@@ -101,13 +105,14 @@ def test_k1_bucket_ending_early_is_available_only_at_bucket_end():
 # ---------------------------------------------------------------- K2 last intraday bucket vs closing call
 def test_k2_last_intraday_bucket_and_close_auction_are_separate():
     bars = flat(D, expected_slots(D))
-    bars[at(D, 13, 20)] = (100.0, 100.0, 100.0, 100.5, 1000)
+    bars[at(D, 13, 20)] = (100.0, 100.5, 100.0, 100.5, 1000)             # valid OHLC: high >= close
     bars[at(D, 13, 30)] = (102.0, 102.0, 102.0, 102.0, 7000)          # closing call
+    assert _valid_ohlc(bars)
     bk = buckets(D, bars)
     last = bk["13:00"]
     assert [s.time() for s in last["expected"]] == [time(13, m) for m in (0, 5, 10, 15, 20)]
     assert last["bucket_end"] == last["available_at"] == at(D, 13, 25)
-    assert last["close"] == 100.5 and last["high"] == 100.0
+    assert last["close"] == 100.5 and last["high"] == 100.5
     assert last["volume"] == 5 * 1000 and last["high"] < 102.0         # 13:30 not merged
     ca = bk["CLOSE_AUCTION"]
     assert [s.time() for s in ca["expected"]] == [time(13, 30)]
