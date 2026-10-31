@@ -38,7 +38,7 @@ import numpy as np
 import pandas as pd
 
 from ..clock import TAIPEI
-from ..reference.official_daily import load_official_daily, security_type
+from ..reference.official_daily import lake_scope, load_official_daily, security_type
 from ..run_context import git_sha
 from . import corporate_events as CE
 from .bars import liquidity_bucket
@@ -53,6 +53,31 @@ OUT_COLUMNS = ["exchange", "date", "symbol", "instrument_class", "fund_limit_cla
                "liquidity_bucket", "official_close", "reference_price", "reference_source", "limit_up", "limit_down",
                "price_limit_status", "finlab_high", "finlab_low", "limit_consistent", "buy_eligibility",
                "sell_eligibility", "raw_sha256"]
+
+
+def _tick(p: np.ndarray, fund: np.ndarray) -> np.ndarray:
+    stock = np.select([p < 10, p < 50, p < 100, p < 500, p < 1000], [0.01, 0.05, 0.1, 0.5, 1.0], default=5.0)
+    return np.where(fund, np.where(p < 50, 0.01, 0.05), stock)
+
+
+def limit_prices_vec(ref, symbols: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorised corporate_events.limit_prices (same rounding: up floored, down ceiled, tick of the result's band)."""
+    ref = np.asarray(ref, dtype=float)
+    u = pd.Series(symbols.unique())
+    fund = symbols.map(dict(zip(u, u.map(CE.is_fund_like)))).to_numpy(dtype=bool)
+    pct = symbols.map(dict(zip(u, u.map(CE.pct_for)))).to_numpy(dtype=float)
+    ok = np.isfinite(ref) & (ref > 0)
+    r = np.where(ok, ref, 1.0)
+    up_raw, dn_raw = r * (1 + pct), r * (1 - pct)
+    t = _tick(up_raw, fund)
+    up = np.floor(up_raw / t + 1e-9) * t
+    t2 = _tick(up, fund)
+    up = np.where(t2 != t, np.floor(up_raw / t2 + 1e-9) * t2, up)
+    t = _tick(dn_raw, fund)
+    dn = np.ceil(dn_raw / t - 1e-9) * t
+    t2 = _tick(dn, fund)
+    dn = np.where(t2 != t, np.ceil(dn_raw / t2 - 1e-9) * t2, dn)
+    return np.where(ok, np.round(up, 2), np.nan), np.where(ok, np.round(dn, 2), np.nan)
 
 
 def _is_sentinel(up, dn) -> np.ndarray:
@@ -100,18 +125,18 @@ def build_rules(od: pd.DataFrame, ev: pd.DataFrame, listings: pd.DataFrame, raw:
         d["p_" + c] = g[c].shift(1)
     d["prev_session"] = d["date"].map(prev_session)
     contiguous = d["p_date"].notna() & (d["p_date"] == d["prev_session"])
-    d["instrument_class"] = d["symbol"].map(security_type)
+    us = pd.Series(d["symbol"].unique())
+    d["instrument_class"] = d["symbol"].map(dict(zip(us, us.map(security_type))))
     el = event_limits(ev, cal)
     d = d.merge(el.rename(columns={"limit_up": "ev_up", "limit_down": "ev_dn", "ref_price": "ev_ref"}),
                 on=["symbol", "date"], how="left")
     fcls = fund_limit_classes(el, od)
-    fund = d["symbol"].map(CE.is_fund_like)
+    fund = d["symbol"].map(dict(zip(us, us.map(CE.is_fund_like)))).astype(bool)
     d["fund_limit_class"] = np.where(fund, d["symbol"].map(fcls).fillna("UNKNOWN"), "NOT_FUND")
     lst = listings[listings["event"].isin(["listed", "listed_current_isin"])].groupby("symbol")["date"].max()
     ld = pd.to_datetime(d["symbol"].map(lst))
-    sess_no = pd.Series(np.arange(len(cal)), index=cal)
-    new_listing = ld.notna() & (d["date"] >= ld) & \
-        ((d["date"].map(sess_no) - ld.map(lambda x: cal.searchsorted(x) if pd.notna(x) else np.nan)) < 5)
+    li_pos = np.where(ld.notna(), cal.searchsorted(ld.fillna(cal.min()).to_numpy()), -10**9)
+    new_listing = ld.notna() & (d["date"] >= ld) & ((cal.searchsorted(d["date"].to_numpy()) - li_pos) < 5)
 
     nx_up = d["p_next_limit_up"].where(contiguous)
     nx_dn = d["p_next_limit_down"].where(contiguous)
@@ -123,9 +148,7 @@ def build_rules(od: pd.DataFrame, ev: pd.DataFrame, listings: pd.DataFrame, raw:
         default="NONE")
     d["reference_price"] = np.select([d["ev_ref"].notna(), nx_up.notna()],
                                      [d["ev_ref"], d["p_next_reference"].where(contiguous)], default=ref)
-    der = [CE.limit_prices(r, CE.tick_for(s), CE.pct_for(s)) if pd.notna(r) else (np.nan, np.nan)
-           for r, s in zip(ref, d["symbol"])]
-    der_up, der_dn = np.array([x[0] for x in der], dtype=float), np.array([x[1] for x in der], dtype=float)
+    der_up, der_dn = limit_prices_vec(ref, d["symbol"])
     ev_has, nx_has = d["ev_up"].notna(), nx_up.notna()
     status = np.select(
         [ev_has & _is_sentinel(d["ev_up"], d["ev_dn"]), ev_has,
@@ -199,9 +222,9 @@ def validation(rules: pd.DataFrame) -> dict:
     """Derived-rule check on sessions where an official band exists: recompute from the reference that the DERIVED
     path would have used and compare."""
     v = rules[rules["price_limit_status"].isin(["VERIFIED_OFFICIAL_EVENT", "VERIFIED_OFFICIAL_NEXT_DAY"])]
-    calc = [CE.limit_prices(r, CE.tick_for(s), CE.pct_for(s)) for r, s in zip(v["reference_price"], v["symbol"])]
-    up = np.isclose([c[0] for c in calc], v["limit_up"], atol=1e-6)
-    dn = np.isclose([c[1] for c in calc], v["limit_down"], atol=1e-6)
+    cu, cd = limit_prices_vec(v["reference_price"], v["symbol"])
+    up = np.isclose(cu, v["limit_up"], atol=1e-6)
+    dn = np.isclose(cd, v["limit_down"], atol=1e-6)
     out = {}
     for st in ("VERIFIED_OFFICIAL_EVENT", "VERIFIED_OFFICIAL_NEXT_DAY"):
         m = (v["price_limit_status"] == st).to_numpy()
@@ -230,11 +253,15 @@ def run(official_root: Path, ca_root: Path, out_root: Path, data_root: Path | No
                                        "data_root": str(data_root), "version": RULES_VERSION}, log=log)
     summary: dict = {"version": RULES_VERSION}
     with st.stage("evidence") as rec:
-        od = load_official_daily(official_root, log=log)
+        raw = CE.load_lake(Path(data_root), log=log)[0] if data_root else None
+        lake_syms = set(raw["symbol"].unique()) if raw is not None else set()
+        od = load_official_daily(official_root, log=log, symbol_filter=lake_scope(lake_syms))
+        summary["out_of_scope_official_rows"] = int(od.attrs.get("out_of_scope_rows", 0))
         wide = CE.load_wide(ca_root)
         ev = CE.build_events(wide) if wide else pd.DataFrame(columns=CE.EVENT_COLUMNS)
         li = CE.build_listings(wide)
-        raw = CE.load_lake(Path(data_root), log=log)[0] if data_root else None
+        if raw is not None:
+            raw = raw[["symbol", "date", "high", "low"]]
         rec.update(official_rows=len(od), events=len(ev))
     with st.stage("build") as rec:
         rules = build_rules(od, ev, li, raw)
