@@ -149,3 +149,26 @@ def test_run_offline_from_archived_official_tables(tmp_path):
     s = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     assert s["sessions"]["n"] == 3 and "not evidence" in s["statement"]
     assert "universe_symbols.parquet" in json.loads((out / "manifest.json").read_text(encoding="utf-8"))["sha256"]
+
+
+def test_stale_delisting_record_of_reused_code_is_ignored():
+    od = _od(_anchor() + [dict(exchange="TWSE", symbol="2301", date=d, volume_shares=1e6, close=100.0) for d in DAYS])
+    raw = _raw(_raw_anchor() + [("2301", d, 100.0, 1e6) for d in DAYS])
+    li = _li([dict(exchange="TWSE", symbol="2301", event="delisted", date=T("2002-11-04"))])
+    p, tr = U.build_panel(od, raw, li, NO_HALT)
+    assert not p.loc[p["symbol"] == "2301", "delisted_official"].any()
+    assert len(p.attrs["stale_delisting_records"]) == 1
+    sym = U.symbol_table(p, li, tr, DAYS[-1]).set_index("symbol")
+    assert sym.at["2301", "termination_status"] == "ACTIVE" and pd.isna(sym.at["2301", "official_delisting_date"])
+    assert U.valuation_status(p, "2301", DAYS[2]) == "PRICED"
+
+
+def test_missing_causes():
+    od = _od(_anchor() + [dict(exchange="TPEX", symbol="6103", date=DAYS[0], volume_shares=500, close=10.0),
+                          dict(exchange="TPEX", symbol="6103", date=DAYS[1], volume_shares=3000, close=10.0),
+                          dict(exchange="TPEX", symbol="6103", date=DAYS[2], volume_shares=3000, close=10.0)])
+    p, _ = U.build_panel(od, _raw(_raw_anchor()), _li([]), NO_HALT)
+    wide = {"TPEX_chtm": pd.DataFrame({"period": [DAYS[1].strftime("%Y-%m-%d")], "table": "0", "row": [0],
+                                       "sha256": "s", "證券代號": ["6103"], "變更交易": ["Y"]})}
+    m = U.missing_causes(p, wide).set_index("date")["likely_cause"]
+    assert list(m) == ["SUB_BOARD_LOT_VOLUME", "TPEX_ALTERED_OR_MANAGED_TRADING", "UNEXPLAINED"]
