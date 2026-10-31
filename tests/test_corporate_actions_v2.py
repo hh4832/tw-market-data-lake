@@ -195,3 +195,15 @@ def test_run_offline_writes_manifest(tmp_path):
     assert set(m["sha256"]) >= {"corporate_actions_v2.parquet", "research_quarantine.csv", "summary.json"}
     with pytest.raises(SystemExit):
         V.run(root, tmp_path / "quality_acceptance", log=lambda *_: None)
+
+
+def test_finlab_late_adjustment_with_matching_factor_is_classified():
+    cal = _cal("2025-07-09", "2025-07-10", "2025-07-11")
+    raw = pd.DataFrame({"symbol": "8905", "date": cal, "close": [10.0, 9.5, 9.6], "volume_shares": [1e3, 1e3, 1e3]})
+    v = _build([dict(exchange="TPEX", symbol="8905", event_type="cash_dividend", event_date="2025-07-10",
+                     prev_close=10.0, ref_price=9.5, cash_dividend=0.5)], cal, raw=raw)
+    late = pd.DataFrame({"symbol": ["8905"], "jump_date": [T("2025-07-11")], "implied_factor": [0.95]})
+    d, _ = V.diagnostics(v, late, T("2023-05-01"))
+    assert d.iloc[0]["timing_status"] == "FINLAB_LATE_ADJUSTMENT_FACTOR_MATCH" and d.iloc[0]["finlab_lag_days"] == 1
+    off = late.assign(implied_factor=0.90)                                   # factor disagrees: stays unexplained
+    assert V.diagnostics(v, off, T("2023-05-01"))[0].iloc[0]["timing_status"] == "UNEXPLAINED_TIMING"

@@ -56,6 +56,8 @@ RESEARCH_QUARANTINE = [
                "factor 5.0 on 2024-11-19 unexplained",
      "scope": "research signals, valuation and any holding across the window", "separate_from": "B2 QUARANTINE_FROZEN_V1"},
 ]
+LATE_MAX_DAYS, LATE_FACTOR_TOL = 7, 0.002   # FinLab adjusting 1-7 calendar days after the symbol already traded on the
+                                           # official basis, with the same factor: a FinLab timing error, not ours
 OUT_COLUMNS = ["event_id", "exchange", "symbol", "name", "event_type", "official_effective_date",
                "effective_market_session", "session_shifted", "first_observed_trade_date", "prev_close", "ref_price",
                "price_factor", "limit_up", "limit_down", "cash_per_share", "stock_per_share", "subscription_shares",
@@ -205,12 +207,16 @@ def diagnostics(v2: pd.DataFrame, jumps: pd.DataFrame, data_start: pd.Timestamp)
     cand = cand.drop_duplicates("event_id").drop_duplicates(["symbol", "finlab_jump_date"])   # one jump per event
     d = d.merge(cand[["event_id", "finlab_jump_date", "finlab_implied_factor"]], on="event_id", how="left")
     d["factor_rel_err"] = (d["finlab_implied_factor"] / d["price_factor"] - 1).abs()
+    basis = d[["effective_market_session", "first_observed_trade_date"]].max(axis=1)
+    d["finlab_lag_days"] = (d["finlab_jump_date"] - basis).dt.days
+    late = d["finlab_lag_days"].between(1, LATE_MAX_DAYS)
     d["timing_status"] = np.select(
         [d["official_effective_date"] < data_start, d["finlab_jump_date"].isna(),
          d["finlab_jump_date"] == d["official_effective_date"], d["finlab_jump_date"] == d["effective_market_session"],
-         d["finlab_jump_date"] == d["first_observed_trade_date"]],
+         d["finlab_jump_date"] == d["first_observed_trade_date"],
+         late & (d["factor_rel_err"] <= LATE_FACTOR_TOL)],
         ["OUT_OF_FINLAB_SCOPE", "NO_FINLAB_ADJUSTMENT", "MATCH_OFFICIAL_DATE", "MATCH_EFFECTIVE_SESSION",
-         "MATCH_FIRST_OBSERVED_TRADE"], default="UNEXPLAINED_TIMING")
+         "MATCH_FIRST_OBSERVED_TRADE", "FINLAB_LATE_ADJUSTMENT_FACTOR_MATCH"], default="UNEXPLAINED_TIMING")
     used = set(zip(d["symbol"], d["finlab_jump_date"]))
     free = np.array([(s, x) not in used for s, x in zip(jumps["symbol"], jumps["jump_date"])], dtype=bool)
     orphan = jumps[(jumps["jump_date"] >= data_start).to_numpy() & free].copy()
