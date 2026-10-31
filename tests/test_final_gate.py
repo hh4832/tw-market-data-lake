@@ -1,6 +1,7 @@
 """FINAL GATE acceptance harness - synthetic end-to-end and known-answer tests (SYNTHETIC_SMOKE_ONLY)."""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -176,6 +177,12 @@ def test_scope_matrix_and_blockers(gate_result):
     sc = G.scope_matrix(src, res["probe_ok"])
     assert {"S1", "S2", "S1A", "M1", "M5", "M20", "X1", "X2", "X3", "X4"} == set(sc["scope_id"])
     assert sc.set_index("scope_id").at["X1", "status"] == "EXCLUDED_FAIL_CLOSED"
+    s1a = json.loads(sc.set_index("scope_id").at["S1", "top_exclusion_reasons"])
+    assert "QUARANTINE_8101" in s1a                                  # 8101 rows labelled as quarantine
+    src2 = make_src()
+    src2.mask.loc[src2.mask["symbol"] == "2330", "level_A_strict"] = False
+    a = json.loads(G.scope_matrix(src2, res["probe_ok"]).set_index("scope_id").at["S1A", "top_exclusion_reasons"])
+    assert a.get("price-usable but not Level A strict", 0) > 0 and a.get("QUARANTINE_8101", 0) == 40
     blk = G.blocker_register(res["checks"], {"all_ok": True})
     assert (blk["severity"] != "BLOCKING").all() and len(blk) == len(G.STATIC_BLOCKERS)
     md = G.report_md(res, sc, blk, {"all_ok": True}, {"run_id": "t", "repo_commit": "abcdef0"})

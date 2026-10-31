@@ -138,7 +138,7 @@ def scope_matrix(src: Sources, probe_ok: dict) -> pd.DataFrame:
     m["security_type"] = m["symbol"].map(dict(zip(us, us.map(security_type))))
     st = m[m["security_type"] == "STOCK"]
     q = np.zeros(len(st), dtype=bool)
-    for r in RESEARCH_QUARANTINE:
+    for r in (src.quarantine or RESEARCH_QUARANTINE):
         q |= ((st["symbol"] == r["symbol"]) & (st["date"] >= r["start"]) & (st["date"] <= r["end"])).to_numpy()
     rows = []
 
@@ -160,7 +160,12 @@ def scope_matrix(src: Sources, probe_ok: dict) -> pd.DataFrame:
             ("S1A", "INTRADAY_ROBUSTNESS_LEVEL_A", "level_A_strict", "INTRADAY_PRICE",
              "as S1 with 54/54 bars and zero residual")):
         ok = st[col].astype(bool) & ~q
-        reasons = st.loc[~ok, "exclusion_reason"].replace("", "QUARANTINE_8101").value_counts().head(6).to_dict()
+        # exclusion_reason explains the PRICE tier only: label the rest by the actual cause
+        why = np.where(q, "QUARANTINE_8101", np.where(st["exclusion_reason"] != "", st["exclusion_reason"],
+                                                      {"can_use_for_volume_backtest": "price-usable but volume not EXACT",
+                                                       "level_A_strict": "price-usable but not Level A strict"}
+                                                      .get(col, "unlabelled")))
+        reasons = pd.Series(why, index=st.index)[~ok].value_counts().head(7).to_dict()
         verified = probe_ok.get(probe_key, False)
         add(sid, cls, "common stocks (4-digit codes) TWSE + TPEx", "USABLE" if verified else "NOT_VERIFIED", cond,
             "exclusion_reason != '' (special sessions/disposal, quarantined exchange dates, unresolved gaps, "
@@ -168,7 +173,7 @@ def scope_matrix(src: Sources, probe_ok: dict) -> pd.DataFrame:
             len(st), ok.sum(), fill_intra, _ret(ok, st["liquidity_bucket"]), _ret(ok, st["date"].dt.year),
             json.dumps(reasons, ensure_ascii=False))
     for h in (1, 5, 20):
-        r = C.multi_day_retention(src.rules, src.ca, h, RESEARCH_QUARANTINE)
+        r = C.multi_day_retention(src.rules, src.ca, h, (src.quarantine or RESEARCH_QUARANTINE))
         ok = r["reason"] == "USABLE"
         add(f"M{h}", f"MULTI_DAY_HOLD_{h}_SESSIONS", "common stocks", "USABLE" if probe_ok.get("MULTI_DAY", False)
             else "NOT_VERIFIED",

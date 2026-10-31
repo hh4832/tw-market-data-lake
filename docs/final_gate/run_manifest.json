@@ -1,0 +1,107 @@
+{
+  "run_id": "final_gate_20261031_154458_20eba73",
+  "repo_commit": "20eba73",
+  "verdict": "SCOPED GO",
+  "drive_folder": "_tw-market-data-lake/audits/final_gate/final_gate_20261031_154458_20eba73",
+  "full_manifest": "run_manifest.json in the Drive folder (outputs_sha256 of every result file)",
+  "ledger_sha256_run1_equals_run2": "4da8071b7767f5754354feea0b494274b9ac75f0ad5af03f18b4f6cdcc0967b5",
+  "params": {
+    "dates": 30,
+    "k": 10,
+    "seed": 20261031,
+    "horizon": 5,
+    "commission": 0.001425,
+    "sell_tax": 0.003,
+    "slip_ticks": 1,
+    "participation_cap": 0.1
+  },
+  "pins": {
+    "fubon_5m": {
+      "seq": 68,
+      "version_dir": "versions/000068_20261025_211531_4ceb32f",
+      "ok": true
+    },
+    "quality_mask": {
+      "dir": "audits/quality_acceptance/quality_mask_20261030_014633_fbec159",
+      "sha256": "9ec79fe02412c25dae56572a334c167c168e374a438dd71e9f4dc0e138ac6863",
+      "evidence_version": "quality_v1.0.0+eligibility_63ffd6f+recon_c111ab2+price_price_check_20261029_235425_4308c60",
+      "integration_check": "PASS",
+      "recount": {
+        "symbol_days": 1788899,
+        "price_backtest": 1733539,
+        "volume_backtest": 1707922,
+        "level_A_strict": 212428
+      }
+    },
+    "corporate_actions_v2": {
+      "dir": "derived/corporate_actions_v2/corporate_actions_v2_20261031_200705_75aed1d",
+      "version": "2.0.0",
+      "code_commit": "75aed1d",
+      "files": 6,
+      "sha_mismatch": {},
+      "corporate_actions_v2.parquet": "62be38f04b0f495b9c00decb07ece2a7ec77128b2b7e0d53117cdb2a5551f3e9"
+    },
+    "trading_rules": {
+      "dir": "derived/trading_rules/trading_rules_20261031_222459_c5c5a4b",
+      "version": "1.0.0",
+      "code_commit": "c5c5a4b",
+      "files": 5,
+      "sha_mismatch": {}
+    },
+    "universe_pit": {
+      "dir": "audits/universe_pit/universe_pit_20261031_222454_c5c5a4b",
+      "version": "1.0.0",
+      "code_commit": "c5c5a4b",
+      "files": 11,
+      "sha_mismatch": {}
+    }
+  },
+  "hard_checks": {
+    "signal_inputs_before_available_at": [
+      true,
+      398
+    ],
+    "entry_not_before_available_at": [
+      true,
+      398
+    ],
+    "signal_identical_on_truncated_data": [
+      true,
+      580
+    ],
+    "fill_price_inside_real_bar": [
+      true,
+      744
+    ],
+    "no_fill_in_closing_auction": [
+      true,
+      744
+    ],
+    "exit_after_entry": [
+      true,
+      142
+    ],
+    "corporate_action_accounting_consistent": [
+      true,
+      4
+    ],
+    "closed_trades_fully_priced": [
+      true,
+      336
+    ],
+    "reproducible_same_version_rerun": [
+      true,
+      870
+    ],
+    "pins_and_sha": [
+      true,
+      5
+    ]
+  },
+  "closed_by_strategy": {
+    "INTRADAY_PRICE": 100,
+    "INTRADAY_VOLUME": 94,
+    "MULTI_DAY": 142
+  },
+  "post_run_correction": "SCOPE_MATRIX exclusion labels for S2/S1A corrected (empty mask reason was printed as QUARANTINE_8101); counts unchanged; code fixed in the same commit"
+}
