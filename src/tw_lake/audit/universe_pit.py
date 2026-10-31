@@ -120,6 +120,12 @@ def build_panel(od: pd.DataFrame, raw: pd.DataFrame | None, li: pd.DataFrame, ha
     hk = set(zip(halts["symbol"], halts["date"]))
     p["halted_official"] = [(s, d) in hk for s, d in zip(p["symbol"], p["date"])]
     term, transfers = terminations(li)
+    # a delisting record followed by official rows of the same symbol on the same exchange is a reused code or a
+    # relisting (e.g. 2301 / 2432 carry 2002 / 2008 records) - it does not terminate the current listing
+    last_off = o.groupby(["symbol", "exchange"])["date"].max()
+    later = [last_off.get((s, e), pd.NaT) > d for s, e, d in zip(term["symbol"], term["exchange"], term["date"])]
+    p.attrs["stale_delisting_records"] = term[np.array(later, dtype=bool)][["symbol", "exchange", "date", "report"]]
+    term = term[~np.array(later, dtype=bool)]
     tmap = dict(zip(term["symbol"], term["date"]))
     texch = dict(zip(term["symbol"], term["exchange"]))
     p["delisted_date"] = pd.to_datetime(p["symbol"].map(tmap))
@@ -138,14 +144,18 @@ def build_panel(od: pd.DataFrame, raw: pd.DataFrame | None, li: pd.DataFrame, ha
          "NO_TRADE_PRICE_PRESENT", "OFFICIAL_TRADED_PRICE_MISSING", "PRICE_AFTER_OFFICIAL_DELISTING",
          "PRICE_BEFORE_OFFICIAL_LISTING", "OFFICIAL_TABLE_MISSING", "PRICE_WITHOUT_OFFICIAL_ROW"],
         default="NO_SOURCE_SIGNAL")
-    p = p.reset_index(drop=True)
-    return p[PANEL_COLUMNS + ["delisted_date", "listing_date"]], transfers
+    p = p.rename(columns={"volume_shares": "official_volume_shares"}).reset_index(drop=True)
+    out = p[PANEL_COLUMNS + ["official_volume_shares", "delisted_date", "listing_date"]].copy()
+    out.attrs = p.attrs
+    return out, transfers
 
 
 def symbol_table(p: pd.DataFrame, li: pd.DataFrame, transfers: pd.DataFrame, last_day: pd.Timestamp,
                  stop_gap_sessions: int = 20) -> pd.DataFrame:
     cal = pd.DatetimeIndex(sorted(p["date"].unique()))
     term, _ = terminations(li)
+    vd = p.dropna(subset=["delisted_date"]).drop_duplicates("symbol")
+    valid = dict(zip(vd["symbol"], vd["delisted_date"]))
     g = p.groupby("symbol")
     off = p[p["official_listed"]].groupby("symbol")["date"]
     s = pd.DataFrame({
@@ -159,8 +169,10 @@ def symbol_table(p: pd.DataFrame, li: pd.DataFrame, transfers: pd.DataFrame, las
         "price_after_delisting_days": g["coverage_class"].agg(lambda x: int((x == "PRICE_AFTER_OFFICIAL_DELISTING").sum())),
     }).reset_index()
     s["official_listing_date"] = pd.to_datetime(s["symbol"].map(first_listing(li)))
-    s["official_delisting_date"] = s["symbol"].map(dict(zip(term["symbol"], term["date"])))
-    s["delisting_report"] = s["symbol"].map(dict(zip(term["symbol"], term["report"])))
+    s["official_delisting_date"] = pd.to_datetime(s["symbol"].map(valid))
+    rep = {(a, b): r for a, b, r in zip(term["symbol"], term["date"], term["report"])}
+    s["delisting_report"] = [rep.get((a, b)) if pd.notna(b) else None
+                             for a, b in zip(s["symbol"], s["official_delisting_date"])]
     tr: dict[str, list] = {}
     for sy, dt in zip(transfers["symbol"], transfers["date"]):
         tr.setdefault(sy, []).append(pd.Timestamp(dt).strftime("%Y-%m-%d"))
@@ -171,6 +183,24 @@ def symbol_table(p: pd.DataFrame, li: pd.DataFrame, transfers: pd.DataFrame, las
         [s["official_delisting_date"].notna(), stopped, s["last_official_date"].isna()],
         ["DELISTED_OFFICIAL", "STOPPED_NO_OFFICIAL_RECORD", "NEVER_IN_OFFICIAL_TABLES"], default="ACTIVE")
     return s[SYMBOL_COLUMNS].sort_values("symbol").reset_index(drop=True)
+
+
+def missing_causes(p: pd.DataFrame, wide: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """OFFICIAL_TRADED_PRICE_MISSING rows with the most likely cause; nothing is excluded or filled here."""
+    m = p[p["coverage_class"] == "OFFICIAL_TRADED_PRICE_MISSING"].copy()
+    ch = CE.chtm_flags(wide)
+    flags = ["altered", "split_session", "managed", "halted"]
+    if len(ch):
+        m = m.merge(ch.drop_duplicates(["symbol", "date"])[["symbol", "date"] + flags], on=["symbol", "date"],
+                    how="left")
+    for c in flags:
+        m[c] = m[c].astype("boolean").fillna(False).astype(bool) if c in m.columns else False
+    v = m["official_volume_shares"].fillna(0)
+    m["likely_cause"] = np.select(
+        [v < 1000, m[["altered", "split_session", "managed"]].any(axis=1), m["delisted_date"].notna()],
+        ["SUB_BOARD_LOT_VOLUME", "TPEX_ALTERED_OR_MANAGED_TRADING", "LATER_OFFICIALLY_DELISTED"],
+        default="UNEXPLAINED")
+    return m
 
 
 def valuation_status(p: pd.DataFrame, symbol: str, date: pd.Timestamp) -> str:
@@ -241,6 +271,8 @@ def run(official_root: Path, ca_root: Path, out_root: Path, data_root: Path | No
         summary["official_tables"] = od.groupby("exchange")["date"].nunique().to_dict()
     with st.stage("panel") as rec:
         p, transfers = build_panel(od, raw, li, halts, bars)
+        stale = p.attrs.pop("stale_delisting_records", pd.DataFrame())
+        p.attrs = {}                                                  # parquet would try to serialise attrs
         sym = symbol_table(p, li, transfers, cal.max())
         p.to_parquet(out / "universe_panel.parquet", index=False)
         sym.to_parquet(out / "universe_symbols.parquet", index=False)
@@ -263,6 +295,13 @@ def run(official_root: Path, ca_root: Path, out_root: Path, data_root: Path | No
         summary["delisted_with_price_after"] = int((sym["price_after_delisting_days"] > 0).sum())
         summary["statement"] = ("aggregate missing rate is not evidence of no survivorship bias; see the breakdown by "
                                 "termination status and security type")
+        stale.to_csv(out / "stale_delisting_records.csv", index=False, encoding="utf-8-sig")
+        summary["stale_delisting_records_ignored"] = int(len(stale))
+        miss = missing_causes(p, wide)
+        miss.to_csv(out / "official_traded_price_missing_causes.csv", index=False, encoding="utf-8-sig")
+        summary["price_missing_causes"] = miss["likely_cause"].value_counts().to_dict() if len(miss) else {}
+        summary["price_missing_causes_by_type"] = miss.groupby(["security_type", "likely_cause"]).size() \
+            .rename("n").reset_index().to_dict("records") if len(miss) else []
         for k, cls in (("official_traded_price_missing", "OFFICIAL_TRADED_PRICE_MISSING"),
                        ("price_after_official_delisting", "PRICE_AFTER_OFFICIAL_DELISTING"),
                        ("price_without_official_row", "PRICE_WITHOUT_OFFICIAL_ROW")):
