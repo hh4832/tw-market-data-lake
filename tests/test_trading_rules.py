@@ -172,3 +172,21 @@ def test_run_offline_from_archived_official_tables(tmp_path):
     assert {"trading_rules.parquet", "status_counts.csv", "execution_semantics.json"} <= set(m["sha256"])
     with pytest.raises(SystemExit):
         R.run(tmp_path / "ov", tmp_path / "ca", tmp_path / "quality_acceptance", log=lambda *_: None)
+
+
+def test_vectorised_limits_equal_scalar_rule():
+    rng = np.random.default_rng(0)
+    refs = np.concatenate([rng.uniform(0.5, 2000, 4000), [9.99, 10, 45.45, 50, 99.95, 100, 499.5, 500, 999, 1000]])
+    syms = pd.Series(np.resize(["2330", "0050", "00631L", "00679B", "1312A"], len(refs)))
+    up, dn = R.limit_prices_vec(refs, syms)
+    exp = [C.limit_prices(r, C.tick_for(s), C.pct_for(s)) for r, s in zip(refs, syms)]
+    assert np.allclose(up, [e[0] for e in exp]) and np.allclose(dn, [e[1] for e in exp])
+    u, d = R.limit_prices_vec([np.nan, 0.0], pd.Series(["2330", "2330"]))
+    assert np.isnan(u).all() and np.isnan(d).all()
+
+
+def test_scope_filter_drops_warrants():
+    from tw_lake.reference.official_daily import lake_scope
+    f = lake_scope({"999999"})
+    m = f(pd.Series(["2330", "030001", "70123P", "00679B", "999999"]))
+    assert list(m) == [True, False, False, True, True]

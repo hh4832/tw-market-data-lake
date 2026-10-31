@@ -105,8 +105,20 @@ def parse_daily(body: bytes, exchange: str) -> pd.DataFrame:
     return pd.DataFrame(columns=[c for c in COLUMNS if c not in ("exchange", "date", "source_report", "raw_sha256")])
 
 
+LAKE_SECURITY_TYPES = ("STOCK", "ETF", "ETN", "REIT", "TDR", "PREFERRED_OR_SPECIAL")
+
+
+def lake_scope(extra_symbols=()) -> "callable":
+    """Row filter for the lake's research scope: known security types (warrants, bonds and other OTHER-coded
+    instruments of the official tables are out of scope) plus any symbol the lake itself carries."""
+    extra = set(map(str, extra_symbols))
+    return lambda sym: sym.map(security_type).isin(LAKE_SECURITY_TYPES) | sym.isin(extra)
+
+
 def load_official_daily(dataset_root: Path, start: str | None = None, end: str | None = None, workers: int = 8,
-                        log=print) -> pd.DataFrame:
+                        log=print, symbol_filter=None) -> pd.DataFrame:
+    """symbol_filter(symbols: Series) -> bool mask, applied per table before concatenation (memory); the number
+    of rows dropped is logged and stored in out.attrs['out_of_scope_rows']."""
     jobs = []
     for sd in sorted((Path(dataset_root) / "shards").glob("year=*/date=*")):
         d = sd.name.split("=", 1)[1]
@@ -118,12 +130,21 @@ def load_official_daily(dataset_root: Path, start: str | None = None, end: str |
             if len(r):
                 jobs.append((ex, d, rep, sd / r["raw_file"].iloc[0], r["sha256"].iloc[0]))
 
+    dropped = [0]
+
     def one(j):
         ex, d, rep, p, sha = j
-        return parse_daily(OV.read_raw(p), ex).assign(exchange=ex, date=d, source_report=rep, raw_sha256=sha)
+        x = parse_daily(OV.read_raw(p), ex)
+        if symbol_filter is not None and len(x):
+            m = symbol_filter(x["symbol"]).to_numpy(dtype=bool)
+            dropped[0] += int((~m).sum())
+            x = x[m]
+        return x.assign(exchange=ex, date=d, source_report=rep, raw_sha256=sha)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         frames = list(pool.map(one, jobs))
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=COLUMNS)
     out["date"] = pd.to_datetime(out["date"])
-    log(f"official daily: {len(jobs)} tables, {len(out)} symbol-days")
-    return out[COLUMNS]
+    out = out[COLUMNS]
+    out.attrs["out_of_scope_rows"] = dropped[0]
+    log(f"official daily: {len(jobs)} tables, {len(out)} symbol-days in scope, {dropped[0]} out of scope")
+    return out
