@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 from ..clock import TAIPEI
-from ..reference.official_daily import load_official_daily, security_type
+from ..reference.official_daily import LAKE_SECURITY_TYPES, lake_scope, load_official_daily, security_type
 from ..run_context import git_sha
 from . import corporate_events as CE
 from .bars import liquidity_bucket
@@ -111,7 +111,7 @@ def build_panel(od: pd.DataFrame, raw: pd.DataFrame | None, li: pd.DataFrame, ha
     for x in parts[1:]:
         p = p.merge(x.drop_duplicates(["symbol", "date"]), on=["symbol", "date"], how="outer")
     for c in ("official_listed", "official_traded", "finlab_price", "finlab_traded", "fubon_bars"):
-        p[c] = p[c].fillna(False).astype(bool) if c in p.columns else False
+        p[c] = p[c].astype("boolean").fillna(False).astype(bool) if c in p.columns else False
     p = p[p["date"].isin(cal)]
     # exchange for rows without an official row: the symbol's nearest official exchange (date-specific otherwise)
     p = p.sort_values(["symbol", "date"])
@@ -222,10 +222,13 @@ def run(official_root: Path, ca_root: Path, out_root: Path, data_root: Path | No
                                       "version": PIT_VERSION}, log=log)
     summary: dict = {"version": PIT_VERSION}
     with st.stage("evidence") as rec:
-        od = load_official_daily(official_root, log=log)
+        raw = CE.load_lake(Path(data_root), log=log)[0] if data_root else None
+        lake_syms = set(raw["symbol"].unique()) if raw is not None else set()
+        od = load_official_daily(official_root, log=log, symbol_filter=lake_scope(lake_syms))
+        summary["scope"] = {"security_types": list(LAKE_SECURITY_TYPES), "plus": "any symbol present in FinLab raw",
+                            "out_of_scope_official_rows": int(od.attrs.get("out_of_scope_rows", 0))}
         wide = CE.load_wide(ca_root)
         li = CE.build_listings(wide)
-        raw = CE.load_lake(Path(data_root), log=log)[0] if data_root else None
         bars = None
         if gap_ledger and Path(gap_ledger).exists():
             bars = pd.read_parquet(gap_ledger, columns=["symbol", "date", "real_bars"])

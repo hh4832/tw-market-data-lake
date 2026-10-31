@@ -137,6 +137,7 @@ v1.2 只新增三個獨立、版本化的衍生資料集，以及研究 repo 讀
 ## 5. 市場成員與下市來源（B5a）
 
 - 每日成員名單 = 官方日行情表中有列出的代號（`official_listed`）。
+- 範圍：股票、ETF、ETN、REIT、TDR、特別股，加上 FinLab 有收錄的任何代號；權證、債券等其他代號不在範圍內，只在 `summary.json` 計數。
 - 下列欄位分開記錄，不合併成單一的「在 universe 內」：
   - `official_traded`
   - `halted_official`（TWSE TWTAWU、TPEx sprc／chtm）
