@@ -136,7 +136,9 @@ def build_rules(od: pd.DataFrame, ev: pd.DataFrame, listings: pd.DataFrame, raw:
     lst = listings[listings["event"].isin(["listed", "listed_current_isin"])].groupby("symbol")["date"].max()
     ld = pd.to_datetime(d["symbol"].map(lst))
     li_pos = np.where(ld.notna(), cal.searchsorted(ld.fillna(cal.min()).to_numpy()), -10**9)
-    new_listing = ld.notna() & (d["date"] >= ld) & ((cal.searchsorted(d["date"].to_numpy()) - li_pos) < 5)
+    # only listings inside the observed calendar: an older listing date says nothing about the first sessions here
+    new_listing = ld.notna() & (ld >= cal.min()) & (d["date"] >= ld) & \
+        ((cal.searchsorted(d["date"].to_numpy()) - li_pos) < 5)
 
     nx_up = d["p_next_limit_up"].where(contiguous)
     nx_dn = d["p_next_limit_down"].where(contiguous)

@@ -190,3 +190,12 @@ def test_scope_filter_drops_warrants():
     f = lake_scope({"999999"})
     m = f(pd.Series(["2330", "030001", "70123P", "00679B", "999999"]))
     assert list(m) == [True, False, False, True, True]
+
+
+def test_listing_before_calendar_is_not_a_new_listing():
+    li = pd.DataFrame([{"exchange": "TWSE", "symbol": "1101", "name": "x", "event": "listed_current_isin",
+                        "date": T("1962-02-09"), "detail": "", "report": "R", "period": "p", "sha256": "s"}])
+    rows = [dict(symbol="1101", date=DAYS[0], volume_shares=1e5, close=40.0),
+            dict(symbol="1101", date=DAYS[1], volume_shares=1e5, close=41.0, change=1.0)]
+    r = _rules(rows, li=li)
+    assert r.loc[("1101", T(DAYS[1])), "price_limit_status"] == "DERIVED"
